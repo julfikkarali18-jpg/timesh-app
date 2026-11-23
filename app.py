@@ -135,47 +135,23 @@ CHART_COLORS = [
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
 
 html, body, [class*="css"] {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    -webkit-tap-highlight-color: rgba(45, 212, 191, 0.35);
 }
 
 .stApp {
-    background: radial-gradient(circle at top right, rgba(59, 130, 246, 0.28), transparent 40%),
-                radial-gradient(circle at top left, rgba(14, 165, 233, 0.22), transparent 36%),
-                linear-gradient(180deg, #0a192f 0%, #071326 100%) !important;
-    color: #f8fafc;
+    background: radial-gradient(circle at top right, rgba(20, 184, 166, 0.08), transparent 36%),
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.07), transparent 32%),
+                #0b1120;
+    color: #f1f5f9;
 }
 
-/* Keep top header & sidebar toggle logo clearly visible with high contrast on mobile and desktop */
+/* Remove top spacing gap on main canvas and sidebar */
 header[data-testid="stHeader"] {
-    background: rgba(11, 17, 32, 0.94) !important;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-    height: 2.8rem !important;
-}
-
-[data-testid="collapsedControl"],
-[data-testid="collapsedControl"] button,
-button[data-testid="stSidebarCollapseButton"],
-button[kind="headerNoPadding"] {
-    background: #facc15 !important;
-    color: #090d16 !important;
-    border: 2px solid #fef08a !important;
-    border-radius: 10px !important;
-    box-shadow: 0 0 14px rgba(250, 204, 21, 0.85) !important;
-    opacity: 1 !important;
-    font-weight: 900 !important;
-}
-
-[data-testid="collapsedControl"] svg,
-[data-testid="collapsedControl"] span,
-button[data-testid="stSidebarCollapseButton"] svg,
-button[data-testid="stSidebarCollapseButton"] span {
-    color: #090d16 !important;
-    stroke: #090d16 !important;
-    fill: #090d16 !important;
+    background: transparent !important;
+    height: 2.2rem !important;
 }
 
 div[data-testid="stAppViewBlockContainer"],
@@ -184,27 +160,12 @@ div[data-testid="stAppViewBlockContainer"],
 }
 
 section[data-testid="stSidebar"] > div:first-child {
-    padding-top: 0.5rem !important;
+    padding-top: 0.45rem !important;
 }
 
 .login-minimal-brand {
     text-align: center;
     padding: 24px 16px 14px 16px;
-}
-
-.login-minimal-logo {
-    width: 58px;
-    height: 58px;
-    margin: 0 auto 10px auto;
-    border-radius: 16px;
-    background: linear-gradient(135deg, #14b8a6, #38bdf8);
-    color: #ffffff;
-    font-size: 28px;
-    font-weight: 800;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 10px 24px -6px rgba(20, 184, 166, 0.55);
 }
 
 .login-minimal-title {
@@ -224,45 +185,27 @@ section[data-testid="stSidebar"] > div:first-child {
 
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0f172a 0%, #0b1120 100%);
-    border-right: 1px solid rgba(148, 163, 184, 0.18);
+    border-right: 1px solid rgba(148, 163, 184, 0.14);
 }
 
 .sidebar-brand {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    background: linear-gradient(135deg, rgba(20, 184, 166, 0.24), rgba(56, 189, 248, 0.14));
-    border: 1px solid rgba(45, 212, 191, 0.55);
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.20), rgba(56, 189, 248, 0.10));
+    border: 1px solid rgba(20, 184, 166, 0.38);
     border-radius: 14px;
-    padding: 13px 15px;
+    padding: 14px 16px;
     margin-bottom: 14px;
 }
 
-.pro-logo-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 11px;
-    background: linear-gradient(135deg, #14b8a6, #38bdf8);
-    color: #ffffff;
-    font-size: 20px;
-    font-weight: 800;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    box-shadow: 0 4px 14px rgba(20, 184, 166, 0.45);
-}
-
 .sidebar-brand-title {
-    font-size: 17px;
-    font-weight: 800;
-    color: #ffffff;
+    font-size: 16px;
+    font-weight: 700;
+    color: #f8fafc;
     letter-spacing: 0.3px;
 }
 
 .sidebar-brand-sub {
     font-size: 12px;
-    color: #cbd5e1;
+    color: #94a3b8;
     margin-top: 2px;
 }
 
@@ -271,23 +214,19 @@ section[data-testid="stSidebar"] {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.9px;
-    color: #5eead4;
+    color: #64748b;
     margin: 8px 0 10px 4px;
-}
-
-div[data-testid="stSidebar"] div.stButton > button,
-div[data-testid="stSidebar"] div.stButton > button * {
-    color: #f8fafc !important;
 }
 
 div[data-testid="stSidebar"] div.stButton > button {
     width: 100%;
     text-align: left !important;
     justify-content: flex-start !important;
-    background: rgba(15, 23, 42, 0.85);
-    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(148, 163, 184, 0.14);
     border-radius: 11px;
     padding: 10px 13px;
+    color: #cbd5e1;
     font-weight: 600;
     font-size: 14px;
     transition: all 0.16s ease;
@@ -295,99 +234,23 @@ div[data-testid="stSidebar"] div.stButton > button {
 }
 
 div[data-testid="stSidebar"] div.stButton > button:hover {
-    background: rgba(30, 41, 59, 0.95);
-    border-color: rgba(45, 212, 191, 0.65);
-    color: #ffffff !important;
+    background: rgba(30, 41, 59, 0.9);
+    border-color: rgba(20, 184, 166, 0.45);
+    color: #f8fafc;
 }
 
-div[data-testid="stSidebar"] div.stButton > button[kind="primary"],
-div[data-testid="stSidebar"] div.stButton > button[kind="primary"] * {
-    background: linear-gradient(135deg, rgba(20, 184, 166, 0.34), rgba(14, 165, 233, 0.22)) !important;
-    border: 1px solid #2dd4bf !important;
-    border-left: 4px solid #5eead4 !important;
-    color: #ffffff !important;
+div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.24), rgba(13, 148, 136, 0.14)) !important;
+    border: 1px solid rgba(45, 212, 191, 0.65) !important;
+    border-left: 4px solid #2dd4bf !important;
+    color: #5eead4 !important;
     font-weight: 700 !important;
-    box-shadow: 0 6px 16px -8px rgba(20, 184, 166, 0.55);
-}
-
-/* Mobile Pro Quick Navigation Bar */
-.mobile-quick-header {
-    display: none;
-}
-
-@media (max-width: 900px) {
-    .mobile-quick-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        background: linear-gradient(135deg, rgba(20, 184, 166, 0.22), rgba(15, 23, 42, 0.96));
-        border: 1px solid rgba(45, 212, 191, 0.5);
-        border-radius: 13px;
-        padding: 9px 13px;
-        margin-bottom: 8px;
-    }
-    .mobile-quick-brand {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-    }
-    .mobile-quick-logo {
-        width: 34px;
-        height: 34px;
-        border-radius: 9px;
-        background: linear-gradient(135deg, #14b8a6, #38bdf8);
-        color: #ffffff;
-        font-size: 17px;
-        font-weight: 800;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-    }
-    .mobile-quick-title {
-        font-size: 15px;
-        font-weight: 800;
-        color: #ffffff;
-        letter-spacing: 0.4px;
-    }
-    .mobile-quick-badge {
-        font-size: 11px;
-        font-weight: 700;
-        color: #042026;
-        background: #5eead4;
-        padding: 3px 9px;
-        border-radius: 999px;
-    }
-    .stMain div.stButton > button,
-    .stMain div.stButton > button * {
-        color: #ffffff !important;
-    }
-    .stMain div.stButton > button {
-        background: rgba(20, 30, 48, 0.96) !important;
-        border: 1px solid rgba(148, 163, 184, 0.35) !important;
-        color: #ffffff !important;
-        font-weight: 700 !important;
-        font-size: 12px !important;
-        min-height: 42px !important;
-    }
-    .stMain div.stButton > button[kind="primary"],
-    .stMain div.stButton > button[kind="primary"] * {
-        background: linear-gradient(135deg, #0d9488, #0284c7) !important;
-        color: #ffffff !important;
-        border: 1px solid #5eead4 !important;
-        font-weight: 800 !important;
-    }
-    .page-banner {
-        padding: 14px 16px !important;
-    }
-    .page-banner-title {
-        font-size: 20px !important;
-    }
+    box-shadow: 0 6px 16px -8px rgba(20, 184, 166, 0.45);
 }
 
 .sidebar-info-box {
-    background: rgba(15, 23, 42, 0.82);
-    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(15, 23, 42, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.14);
     border-radius: 12px;
     padding: 12px 14px;
     font-size: 12px;
@@ -407,7 +270,7 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] * {
 }
 
 .sidebar-info-val {
-    color: #f8fafc;
+    color: #e2e8f0;
     font-weight: 600;
     text-align: right;
     overflow: hidden;
@@ -417,7 +280,7 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] * {
 
 .page-banner {
     background: linear-gradient(120deg, rgba(17, 24, 39, 0.96), rgba(15, 23, 42, 0.92));
-    border: 1px solid rgba(148, 163, 184, 0.18);
+    border: 1px solid rgba(148, 163, 184, 0.16);
     border-left: 4px solid #14b8a6;
     border-radius: 14px;
     padding: 18px 22px;
@@ -537,24 +400,24 @@ div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
 }
 
 button[data-baseweb="tab"] {
-    background-color: rgba(15, 23, 42, 0.78) !important;
-    border: 1px solid rgba(148, 163, 184, 0.18) !important;
+    background-color: rgba(15, 23, 42, 0.7) !important;
+    border: 1px solid rgba(148, 163, 184, 0.14) !important;
     border-radius: 10px 10px 0 0 !important;
-    color: #cbd5e1 !important;
+    color: #94a3b8 !important;
     font-weight: 600 !important;
     padding: 10px 18px !important;
     margin-right: 6px !important;
 }
 
 button[data-baseweb="tab"][aria-selected="true"] {
-    background-color: rgba(20, 184, 166, 0.20) !important;
-    border-color: rgba(45, 212, 191, 0.6) !important;
-    color: #ffffff !important;
+    background-color: rgba(20, 184, 166, 0.16) !important;
+    border-color: rgba(20, 184, 166, 0.5) !important;
+    color: #5eead4 !important;
 }
 
 .stMain .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #0d9488, #14b8a6);
-    color: #ffffff;
+    color: #06202a;
     font-weight: 700;
     border: none;
     border-radius: 9px;
@@ -562,12 +425,12 @@ button[data-baseweb="tab"][aria-selected="true"] {
 
 .stMain .stButton > button[kind="primary"]:hover {
     background: linear-gradient(135deg, #14b8a6, #2dd4bf);
-    color: #ffffff;
+    color: #041820;
 }
 
 .stMain .stButton > button {
     border-radius: 9px;
-    border: 1px solid rgba(148, 163, 184, 0.24);
+    border: 1px solid rgba(148, 163, 184, 0.22);
     font-weight: 500;
 }
 
@@ -600,7 +463,7 @@ div[class*="st-key-roster_not_found_"] button:hover {
 }
 
 .form-panel {
-    background: rgba(17, 24, 39, 0.88);
+    background: rgba(17, 24, 39, 0.86);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 14px;
     padding: 18px 20px;
@@ -715,119 +578,6 @@ div[class*="st-key-roster_not_found_"] button:hover {
 """
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
-
-def get_auth_secret() -> str:
-    try:
-        if "AUTH_SECRET" in st.secrets and str(st.secrets["AUTH_SECRET"]).strip():
-            return str(st.secrets["AUTH_SECRET"]).strip()
-    except Exception:
-        pass
-    env_sec = os.environ.get("TIMESH_AUTH_SECRET", "").strip()
-    if env_sec:
-        return env_sec
-    return hashlib.sha256(f"timesh-persistent-session-{SPREADSHEET_NAME}".encode("utf-8")).hexdigest()
-
-
-def build_auth_token(username: str, role: str) -> str:
-    u_clean = str(username or "").strip().lower()
-    r_clean = str(role or "user").strip().lower()
-    payload = f"{u_clean}:{r_clean}"
-    sig = hmac.new(get_auth_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
-    return f"{u_clean}.{r_clean}.{sig}"
-
-
-def verify_auth_token(token: str, users_map: dict) -> dict | None:
-    tok = str(token or "").strip()
-    parts = tok.split(".")
-    if len(parts) != 3:
-        return None
-    u_clean, r_clean, sig = parts[0].strip().lower(), parts[1].strip().lower(), parts[2].strip()
-    u_rec = users_map.get(u_clean)
-    if not u_rec:
-        return None
-    actual_role = str(u_rec.get("role", "user")).strip().lower()
-    if actual_role != r_clean:
-        return None
-    expected_tok = build_auth_token(u_clean, actual_role)
-    if not hmac.compare_digest(tok, expected_tok):
-        return None
-    return {
-        "username": u_clean,
-        "name": u_rec.get("name", u_clean),
-        "role": actual_role,
-    }
-
-
-def save_auth_token_to_browser(token: str):
-    safe_tok = token.replace("\\", "\\\\").replace("'", "\\'")
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            try {{
-                window.localStorage.setItem('timesh_auth_token', '{safe_tok}');
-                window.sessionStorage.setItem('timesh_auth_token', '{safe_tok}');
-                document.cookie = 'timesh_auth_token=' + encodeURIComponent('{safe_tok}') + '; path=/; max-age=2592000; SameSite=Lax';
-            }} catch (e) {{}}
-        }})();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
-
-def clear_auth_token_from_browser():
-    components.html(
-        """
-        <script>
-        (function() {
-            try {
-                window.localStorage.removeItem('timesh_auth_token');
-                window.sessionStorage.removeItem('timesh_auth_token');
-                document.cookie = 'timesh_auth_token=; path=/; max-age=0; SameSite=Lax';
-            } catch (e) {}
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
-
-def restore_auth_token_from_browser():
-    components.html(
-        """
-        <script>
-        (function() {
-            try {
-                if (window.__timeshAuthRestoreDone) return;
-                window.__timeshAuthRestoreDone = true;
-                var tok = '';
-                try { tok = window.localStorage.getItem('timesh_auth_token') || ''; } catch (e) {}
-                if (!tok) {
-                    try { tok = window.sessionStorage.getItem('timesh_auth_token') || ''; } catch (e) {}
-                }
-                if (!tok && document.cookie) {
-                    var m = document.cookie.match(/(?:^|; )timesh_auth_token=([^;]*)/);
-                    if (m && m[1]) tok = decodeURIComponent(m[1]);
-                }
-                if (tok) {
-                    var p = window.parent || window;
-                    var u = new URL(p.location.href);
-                    if (u.searchParams.get('auth') !== tok) {
-                        u.searchParams.set('auth', tok);
-                        p.location.replace(u.toString());
-                    }
-                }
-            } catch (e) {}
-        })();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
 
 
 def get_current_ist_now() -> datetime:
@@ -963,6 +713,7 @@ def inject_auto_refresh(interval_seconds: int = AUTO_REFRESH_SECONDS, enabled: b
     if not enabled or interval_seconds <= 0:
         return
     ms = int(interval_seconds * 1000)
+    # Trigger Streamlit soft rerun via host/parent DOM event without full-page reload that drops session state
     components.html(
         f"""
         <script>
@@ -1689,15 +1440,11 @@ def render_html_table(rows, max_rows=300):
 
 
 def make_slice_url(field_name, label_val):
-    params = {
+    qs = urllib.parse.urlencode({
         "slice": "Analytics Dashboard",
         "pie_field": field_name,
         "pie_val": label_val,
-    }
-    curr_auth = str(st.session_state.get("persistent_auth_token") or st.query_params.get("auth") or "").strip()
-    if curr_auth:
-        params["auth"] = curr_auth
-    qs = urllib.parse.urlencode(params)
+    })
     return f"?{qs}"
 
 
@@ -1917,10 +1664,6 @@ if not sheet_users_db:
 
 if "logged_in_user" not in st.session_state:
     st.session_state["logged_in_user"] = None
-if "explicit_logout" not in st.session_state:
-    st.session_state["explicit_logout"] = False
-if "persistent_auth_token" not in st.session_state:
-    st.session_state["persistent_auth_token"] = ""
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state["auto_refresh_enabled"] = True
 if "roster_status_overrides" not in st.session_state:
@@ -1932,22 +1675,9 @@ if "dismissed_notifications" not in st.session_state:
 if "toasted_notifications" not in st.session_state:
     st.session_state["toasted_notifications"] = set()
 
-# Restore persistent login session from URL query param or browser storage (until explicit logout)
-qp_auth = str(st.query_params.get("auth", "")).strip()
-if st.session_state["logged_in_user"] is None and not st.session_state["explicit_logout"]:
-    candidate_tok = qp_auth or str(st.session_state.get("persistent_auth_token") or "").strip()
-    restored_user = verify_auth_token(candidate_tok, sheet_users_db) if candidate_tok else None
-    if restored_user:
-        st.session_state["logged_in_user"] = restored_user
-        st.session_state["persistent_auth_token"] = build_auth_token(restored_user["username"], restored_user["role"])
-        st.query_params["auth"] = st.session_state["persistent_auth_token"]
-    elif not qp_auth:
-        restore_auth_token_from_browser()
-
 if st.session_state["logged_in_user"] is None:
     st.markdown(
         "<div class='login-minimal-brand'>"
-        "<div class='login-minimal-logo'>🎓</div>"
         "<div class='login-minimal-title'>TIMESH</div>"
         "<div class='login-minimal-sub'>Faculty Management</div>"
         "</div>",
@@ -1970,12 +1700,7 @@ if st.session_state["logged_in_user"] is None:
                     "name": u_rec["name"],
                     "role": u_rec["role"],
                 }
-                token_str = build_auth_token(login_username, u_rec["role"])
                 st.session_state["logged_in_user"] = logged_user_obj
-                st.session_state["explicit_logout"] = False
-                st.session_state["persistent_auth_token"] = token_str
-                st.query_params["auth"] = token_str
-                save_auth_token_to_browser(token_str)
                 write_activity_log(
                     SPREADSHEET_NAME,
                     logged_user_obj,
@@ -1997,11 +1722,6 @@ if st.session_state["logged_in_user"] is None:
 
 current_user = st.session_state["logged_in_user"]
 is_admin_user = current_user.get("role") == "admin"
-
-active_token = str(st.session_state.get("persistent_auth_token") or build_auth_token(current_user["username"], current_user["role"]))
-st.session_state["persistent_auth_token"] = active_token
-if st.query_params.get("auth") != active_token:
-    st.query_params["auth"] = active_token
 
 q_params = st.query_params
 qp_slice = str(q_params.get("slice", "")).strip()
@@ -2066,11 +1786,8 @@ if is_admin_user and st.session_state.get("active_nav_slice") == "Users" and REQ
 with st.sidebar:
     st.markdown(
         "<div class='sidebar-brand'>"
-        "<div class='pro-logo-icon'>🎓</div>"
-        "<div>"
-        "<div class='sidebar-brand-title'>TIMESH</div>"
+        "<div class='sidebar-brand-title'>🎓 TIMESH</div>"
         "<div class='sidebar-brand-sub'>Faculty & Leave Management Suite</div>"
-        "</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -2137,13 +1854,8 @@ with st.sidebar:
             details=f"User '{current_user.get('username', '')}' logged out.",
         )
         st.session_state["logged_in_user"] = None
-        st.session_state["explicit_logout"] = True
-        st.session_state["persistent_auth_token"] = ""
-        st.query_params.pop("auth", None)
-        clear_auth_token_from_browser()
         st.rerun()
 
-# High-contrast Mobile Quick Navigation Strip (visible on phones)
 due_notifications = collect_scheduled_notifications(nav_leave_rows, nav_dnp_rows, now_ist)
 unseen_toasts = [n for n in due_notifications if n["key"] not in st.session_state["toasted_notifications"]]
 if unseen_toasts:
@@ -2174,135 +1886,7 @@ if visible_alerts:
             st.rerun()
 
 inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
-inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
 
-# --- এখানে হলুদ NAVIGATION বাটনের কোডটি বসাবেন ---
-if "yellow_nav_expanded" not in st.session_state:
-    st.session_state["yellow_nav_expanded"] = False
-
-st.markdown(
-    """
-    <style>
-    div.st-key-yellow_nav_toggle_btn button,
-    div.st-key-yellow_nav_toggle_btn button * {
-        background-color: #facc15 !important;
-        background: #facc15 !important;
-        color: #090d16 !important;
-        border: 2px solid #fef08a !important;
-        font-weight: 900 !important;
-        font-size: 14px !important;
-        border-radius: 10px !important;
-        box-shadow: 0 0 14px rgba(250, 204, 21, 0.75) !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-y_col1, _ = st.columns([1.6, 4.4])
-with y_col1:
-    if st.button(
-        "☰ NAVIGATION",
-        key="yellow_nav_toggle_btn",
-        use_container_width=True,
-    ):
-        st.session_state["yellow_nav_expanded"] = not st.session_state["yellow_nav_expanded"]
-        st.rerun()
-
-if st.session_state["yellow_nav_expanded"]:
-    st.markdown(
-        "<div style='background:#0f172a;border:2px solid #facc15;border-radius:12px;"
-        "padding:10px 12px;margin:6px 0 12px 0;'>"
-        "<div style='color:#facc15;font-size:12px;font-weight:800;margin-bottom:8px;'>"
-        "📌 GO TO PAGE</div></div>",
-        unsafe_allow_html=True,
-    )
-    yn_cols = st.columns(3)
-    for idx_yn, nav_yn in enumerate(NAV_ITEMS):
-        lbl_yn = nav_yn["title"]
-        if nav_yn["key"] == "Leave":
-            lbl_yn = f"Leave ({upcoming_leave_count})"
-        elif nav_yn["key"] == "Do Not Punch":
-            lbl_yn = f"DNP ({active_dnp_count})"
-        elif nav_yn["key"] == "Users" and not is_admin_user:
-            lbl_yn = "Security"
-
-        if yn_cols[idx_yn % 3].button(
-            f"{nav_yn['icon']} {lbl_yn}",
-            key=f"yn_page_btn_{nav_yn['key']}",
-            type="primary" if st.session_state["active_nav_slice"] == nav_yn["key"] else "secondary",
-            use_container_width=True,
-        ):
-            st.session_state["active_nav_slice"] = nav_yn["key"]
-            st.query_params["slice"] = nav_yn["key"]
-            st.session_state["yellow_nav_expanded"] = False
-            st.rerun()
-if "yellow_nav_expanded" not in st.session_state:
-    st.session_state["yellow_nav_expanded"] = False
-
-if st.query_params.get("yn_toggle") == "1":
-    st.session_state["yellow_nav_expanded"] = not st.session_state["yellow_nav_expanded"]
-    st.query_params.pop("yn_toggle", None)
-    st.rerun()
-
-curr_auth_q = str(st.session_state.get("persistent_auth_token") or st.query_params.get("auth") or "").strip()
-curr_slice_q = str(st.session_state.get("active_nav_slice") or "Analytics Dashboard").strip()
-toggle_params = {"slice": curr_slice_q, "yn_toggle": "1"}
-if curr_auth_q:
-    toggle_params["auth"] = curr_auth_q
-toggle_href = html.escape("?" + urllib.parse.urlencode(toggle_params))
-
-st.markdown(
-    f"""
-    <div style="margin: 6px 0 10px 0;">
-        <a href="{toggle_href}" target="_self" style="
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            background-color: #facc15 !important;
-            color: #090d16 !important;
-            font-weight: 900 !important;
-            font-size: 14px !important;
-            padding: 9px 16px !important;
-            border-radius: 10px !important;
-            border: 2px solid #fef08a !important;
-            text-decoration: none !important;
-            box-shadow: 0 0 14px rgba(250, 204, 21, 0.8) !important;
-            letter-spacing: 0.4px;
-        ">☰ NAVIGATION</a>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-if st.session_state["yellow_nav_expanded"]:
-    st.markdown(
-        "<div style='background:#0f172a;border:2px solid #facc15;border-radius:12px;"
-        "padding:10px 12px;margin:4px 0 12px 0;'>"
-        "<div style='color:#facc15;font-size:12px;font-weight:800;margin-bottom:4px;'>"
-        "📌 GO TO PAGE</div></div>",
-        unsafe_allow_html=True,
-    )
-    yn_cols = st.columns(3)
-    for idx_yn, nav_yn in enumerate(NAV_ITEMS):
-        lbl_yn = nav_yn["title"]
-        if nav_yn["key"] == "Leave":
-            lbl_yn = f"Leave ({upcoming_leave_count})"
-        elif nav_yn["key"] == "Do Not Punch":
-            lbl_yn = f"DNP ({active_dnp_count})"
-        elif nav_yn["key"] == "Users" and not is_admin_user:
-            lbl_yn = "Security"
-
-        if yn_cols[idx_yn % 3].button(
-            f"{nav_yn['icon']} {lbl_yn}",
-            key=f"yn_page_btn_{nav_yn['key']}",
-            type="primary" if st.session_state["active_nav_slice"] == nav_yn["key"] else "secondary",
-            use_container_width=True,
-        ):
-            st.session_state["active_nav_slice"] = nav_yn["key"]
-            st.query_params["slice"] = nav_yn["key"]
-            st.session_state["yellow_nav_expanded"] = False
-            st.rerun()
 slice_choice = st.session_state["active_nav_slice"]
 
 
