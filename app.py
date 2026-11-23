@@ -1,16 +1,20 @@
+import base64
 import hashlib
 import hmac
 import html
+import json
 import math
 import os
 import re
 import urllib.parse
 from datetime import date, datetime, timedelta
+
 import gspread
 import streamlit as st
 import streamlit.components.v1 as components
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 st.set_page_config(
@@ -32,8 +36,12 @@ REQUESTS_TAB_NAME = "Feature_Requests"
 ATTENDANCE_BASE_TAB_CANDIDATES = ["Sheet8", "Sheet 8", "Attendance", "ATTENDANCE"]
 ROSTER_TAB_CANDIDATES = ["Sheet2", "Sheet 2", "Roster", "ROSTER"]
 ROSTER_STATUS_COLUMN = "Found_Status"
-AUTO_REFRESH_SECONDS = 120
+AUTO_REFRESH_SECONDS = 60
 CACHE_TTL_SECONDS = 90
+
+# Notification schedules (for records where target From date == today + 1 day)
+DNP_NOTIFY_SLOTS = [(11, 0), (16, 0), (17, 30), (20, 0)]
+LEAVE_NOTIFY_SLOTS = [(17, 0), (20, 0)]
 
 # Sheet8 base period: 01/01/2026 to 20/11/2026; forward projection up to 31/12/2026
 BASE_PERIOD_END = date(2026, 11, 20)
@@ -62,26 +70,51 @@ LEAVE_TYPE_OPTIONS = ["CL", "El", "CCL"]
 APPLYING_STATUS_OPTIONS = ["YES", "NO"]
 TAKE_ACTION_BY_OPTIONS = ["Julfikkar", "Azad", "Safiur"]
 
+PASSWORD_HASH_ITERATIONS = 310_000
 
-def hash_password(password: str, salt: str = "timesh_secure_salt_2026") -> str:
-    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+def hash_password(password: str, salt: str = None) -> str:
+    salt_bytes = os.urandom(16) if salt is None else str(salt).encode("utf-8")
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", str(password).encode("utf-8"), salt_bytes, PASSWORD_HASH_ITERATIONS
+    )
+    salt_text = base64.urlsafe_b64encode(salt_bytes).decode("ascii").rstrip("=")
+    hash_text = base64.urlsafe_b64encode(derived).decode("ascii").rstrip("=")
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt_text}${hash_text}"
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
-    return hmac.compare_digest(hash_password(password), str(stored_hash).strip())
+    stored = str(stored_hash or "").strip()
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt_text, expected_text = stored.split("$", 3)
+            iterations = int(iterations)
+            if not 100_000 <= iterations <= 2_000_000:
+                return False
+            padding = lambda value: value + "=" * (-len(value) % 4)
+            salt_bytes = base64.urlsafe_b64decode(padding(salt_text))
+            expected = base64.urlsafe_b64decode(padding(expected_text))
+            actual = hashlib.pbkdf2_hmac(
+                "sha256", str(password).encode("utf-8"), salt_bytes, iterations
+            )
+            return hmac.compare_digest(actual, expected)
+        except (ValueError, TypeError):
+            return False
+    legacy = hashlib.sha256(f"timesh_secure_salt_2026:{password}".encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy, stored)
 
 
 DEFAULT_USERS = {
     "admin": {
         "name": "System Admin",
         "role": "admin",
-        "password_hash": hash_password("admin@123"),
+        "password_hash": hash_password("admin@123", salt="timesh_default_admin_salt_2026"),
         "created_at": "2026-01-01 00:00:00",
     },
     "staff": {
         "name": "Staff User",
         "role": "user",
-        "password_hash": hash_password("timesh@123"),
+        "password_hash": hash_password("timesh@123", salt="timesh_default_staff_salt_2026"),
         "created_at": "2026-01-01 00:00:00",
     },
 }
@@ -92,7 +125,6 @@ NAV_ITEMS = [
     {"key": "Roster", "icon": "📋", "title": "Roster"},
     {"key": "Leave", "icon": "🗓️", "title": "Leave"},
     {"key": "Do Not Punch", "icon": "🚫", "title": "Do Not Punch"},
-    {"key": "Other Sheet Tabs", "icon": "📑", "title": "Other Tabs"},
     {"key": "Users", "icon": "🔐", "title": "Users & Logs"},
 ]
 
@@ -103,22 +135,75 @@ CHART_COLORS = [
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
 html, body, [class*="css"] {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-tap-highlight-color: rgba(45, 212, 191, 0.35);
 }
 
 .stApp {
-    background: radial-gradient(circle at top right, rgba(20, 184, 166, 0.08), transparent 36%),
-                radial-gradient(circle at top left, rgba(56, 189, 248, 0.07), transparent 32%),
+    background: radial-gradient(circle at top right, rgba(20, 184, 166, 0.11), transparent 36%),
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.10), transparent 32%),
                 #0b1120;
-    color: #f1f5f9;
+    color: #f8fafc;
+}
+
+/* Keep top header & sidebar toggle logo clearly visible with high contrast on mobile and desktop */
+header[data-testid="stHeader"] {
+    background: rgba(11, 17, 32, 0.94) !important;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+    height: 2.8rem !important;
+}
+
+[data-testid="collapsedControl"],
+[data-testid="collapsedControl"] button,
+button[data-testid="stSidebarCollapseButton"],
+button[kind="headerNoPadding"] {
+    background: linear-gradient(135deg, #14b8a6, #0ea5e9) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255, 255, 255, 0.55) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 14px rgba(20, 184, 166, 0.45) !important;
+    opacity: 1 !important;
+}
+
+[data-testid="collapsedControl"] svg,
+[data-testid="collapsedControl"] span,
+button[data-testid="stSidebarCollapseButton"] svg,
+button[data-testid="stSidebarCollapseButton"] span {
+    color: #ffffff !important;
+    stroke: #ffffff !important;
+    fill: #ffffff !important;
+}
+
+div[data-testid="stAppViewBlockContainer"],
+.block-container {
+    padding-top: 0.65rem !important;
+}
+
+section[data-testid="stSidebar"] > div:first-child {
+    padding-top: 0.5rem !important;
 }
 
 .login-minimal-brand {
     text-align: center;
     padding: 24px 16px 14px 16px;
+}
+
+.login-minimal-logo {
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 10px auto;
+    border-radius: 16px;
+    background: linear-gradient(135deg, #14b8a6, #38bdf8);
+    color: #ffffff;
+    font-size: 28px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 10px 24px -6px rgba(20, 184, 166, 0.55);
 }
 
 .login-minimal-title {
@@ -138,31 +223,45 @@ html, body, [class*="css"] {
 
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0f172a 0%, #0b1120 100%);
-    border-right: 1px solid rgba(148, 163, 184, 0.14);
-}
-
-section[data-testid="stSidebar"] > div:first-child {
-    padding-top: 1.2rem;
+    border-right: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .sidebar-brand {
-    background: linear-gradient(135deg, rgba(20, 184, 166, 0.20), rgba(56, 189, 248, 0.10));
-    border: 1px solid rgba(20, 184, 166, 0.38);
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.24), rgba(56, 189, 248, 0.14));
+    border: 1px solid rgba(45, 212, 191, 0.55);
     border-radius: 14px;
-    padding: 14px 16px;
+    padding: 13px 15px;
     margin-bottom: 14px;
 }
 
+.pro-logo-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    background: linear-gradient(135deg, #14b8a6, #38bdf8);
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 4px 14px rgba(20, 184, 166, 0.45);
+}
+
 .sidebar-brand-title {
-    font-size: 16px;
-    font-weight: 700;
-    color: #f8fafc;
+    font-size: 17px;
+    font-weight: 800;
+    color: #ffffff;
     letter-spacing: 0.3px;
 }
 
 .sidebar-brand-sub {
     font-size: 12px;
-    color: #94a3b8;
+    color: #cbd5e1;
     margin-top: 2px;
 }
 
@@ -171,19 +270,23 @@ section[data-testid="stSidebar"] > div:first-child {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.9px;
-    color: #64748b;
+    color: #5eead4;
     margin: 8px 0 10px 4px;
+}
+
+div[data-testid="stSidebar"] div.stButton > button,
+div[data-testid="stSidebar"] div.stButton > button * {
+    color: #f8fafc !important;
 }
 
 div[data-testid="stSidebar"] div.stButton > button {
     width: 100%;
     text-align: left !important;
     justify-content: flex-start !important;
-    background: rgba(15, 23, 42, 0.65);
-    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(148, 163, 184, 0.22);
     border-radius: 11px;
     padding: 10px 13px;
-    color: #cbd5e1;
     font-weight: 600;
     font-size: 14px;
     transition: all 0.16s ease;
@@ -191,23 +294,99 @@ div[data-testid="stSidebar"] div.stButton > button {
 }
 
 div[data-testid="stSidebar"] div.stButton > button:hover {
-    background: rgba(30, 41, 59, 0.9);
-    border-color: rgba(20, 184, 166, 0.45);
-    color: #f8fafc;
+    background: rgba(30, 41, 59, 0.95);
+    border-color: rgba(45, 212, 191, 0.65);
+    color: #ffffff !important;
 }
 
-div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, rgba(20, 184, 166, 0.24), rgba(13, 148, 136, 0.14)) !important;
-    border: 1px solid rgba(45, 212, 191, 0.65) !important;
-    border-left: 4px solid #2dd4bf !important;
-    color: #5eead4 !important;
+div[data-testid="stSidebar"] div.stButton > button[kind="primary"],
+div[data-testid="stSidebar"] div.stButton > button[kind="primary"] * {
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.34), rgba(14, 165, 233, 0.22)) !important;
+    border: 1px solid #2dd4bf !important;
+    border-left: 4px solid #5eead4 !important;
+    color: #ffffff !important;
     font-weight: 700 !important;
-    box-shadow: 0 6px 16px -8px rgba(20, 184, 166, 0.45);
+    box-shadow: 0 6px 16px -8px rgba(20, 184, 166, 0.55);
+}
+
+/* Mobile Pro Quick Navigation Bar */
+.mobile-quick-header {
+    display: none;
+}
+
+@media (max-width: 900px) {
+    .mobile-quick-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: linear-gradient(135deg, rgba(20, 184, 166, 0.22), rgba(15, 23, 42, 0.96));
+        border: 1px solid rgba(45, 212, 191, 0.5);
+        border-radius: 13px;
+        padding: 9px 13px;
+        margin-bottom: 8px;
+    }
+    .mobile-quick-brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+    }
+    .mobile-quick-logo {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: linear-gradient(135deg, #14b8a6, #38bdf8);
+        color: #ffffff;
+        font-size: 17px;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+    .mobile-quick-title {
+        font-size: 15px;
+        font-weight: 800;
+        color: #ffffff;
+        letter-spacing: 0.4px;
+    }
+    .mobile-quick-badge {
+        font-size: 11px;
+        font-weight: 700;
+        color: #042026;
+        background: #5eead4;
+        padding: 3px 9px;
+        border-radius: 999px;
+    }
+    .stMain div.stButton > button,
+    .stMain div.stButton > button * {
+        color: #ffffff !important;
+    }
+    .stMain div.stButton > button {
+        background: rgba(20, 30, 48, 0.96) !important;
+        border: 1px solid rgba(148, 163, 184, 0.35) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        font-size: 12px !important;
+        min-height: 42px !important;
+    }
+    .stMain div.stButton > button[kind="primary"],
+    .stMain div.stButton > button[kind="primary"] * {
+        background: linear-gradient(135deg, #0d9488, #0284c7) !important;
+        color: #ffffff !important;
+        border: 1px solid #5eead4 !important;
+        font-weight: 800 !important;
+    }
+    .page-banner {
+        padding: 14px 16px !important;
+    }
+    .page-banner-title {
+        font-size: 20px !important;
+    }
 }
 
 .sidebar-info-box {
-    background: rgba(15, 23, 42, 0.72);
-    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(15, 23, 42, 0.82);
+    border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 12px;
     padding: 12px 14px;
     font-size: 12px;
@@ -219,7 +398,7 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    margin-bottom: 5px;
+    margin-bottom: 6px;
 }
 
 .sidebar-info-row:last-child {
@@ -227,7 +406,7 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 .sidebar-info-val {
-    color: #e2e8f0;
+    color: #f8fafc;
     font-weight: 600;
     text-align: right;
     overflow: hidden;
@@ -237,7 +416,7 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 
 .page-banner {
     background: linear-gradient(120deg, rgba(17, 24, 39, 0.96), rgba(15, 23, 42, 0.92));
-    border: 1px solid rgba(148, 163, 184, 0.16);
+    border: 1px solid rgba(148, 163, 184, 0.18);
     border-left: 4px solid #14b8a6;
     border-radius: 14px;
     padding: 18px 22px;
@@ -257,6 +436,82 @@ div[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
     font-size: 13px;
     color: #94a3b8;
     margin-top: 6px;
+}
+
+.notify-alert-card {
+    background: linear-gradient(120deg, rgba(245, 158, 11, 0.18), rgba(239, 68, 68, 0.14));
+    border: 1px solid rgba(251, 191, 36, 0.55);
+    border-left: 4px solid #f59e0b;
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+}
+
+.notify-alert-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #fde68a;
+    margin-bottom: 4px;
+}
+
+.notify-alert-item {
+    font-size: 13px;
+    color: #f8fafc;
+    margin: 3px 0;
+}
+
+.today-highlight-card {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(168, 85, 247, 0.16));
+    border: 1px solid rgba(56, 189, 248, 0.55);
+    border-left: 4px solid #38bdf8;
+    border-radius: 12px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    box-shadow: 0 6px 18px -8px rgba(56, 189, 248, 0.35);
+}
+
+.today-highlight-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: #7dd3fc;
+}
+
+.today-highlight-date {
+    font-size: 18px;
+    font-weight: 800;
+    color: #f0f9ff;
+    letter-spacing: 0.3px;
+}
+
+.upcoming-row-red {
+    background: linear-gradient(90deg, rgba(220, 38, 38, 0.24), rgba(153, 27, 27, 0.14)) !important;
+    border: 1px solid rgba(248, 113, 113, 0.55) !important;
+    border-left: 4px solid #ef4444 !important;
+    border-radius: 10px;
+    padding: 9px 12px;
+    margin-bottom: 6px;
+}
+
+.upcoming-row-red, .upcoming-row-red div, .upcoming-row-red span {
+    color: #fecaca !important;
+}
+
+.upcoming-row-green {
+    background: linear-gradient(90deg, rgba(22, 163, 74, 0.26), rgba(21, 128, 61, 0.16)) !important;
+    border: 1px solid rgba(74, 222, 128, 0.65) !important;
+    border-left: 4px solid #22c55e !important;
+    border-radius: 10px;
+    padding: 9px 12px;
+    margin-bottom: 6px;
+}
+
+.upcoming-row-green, .upcoming-row-green div, .upcoming-row-green span {
+    color: #bbf7d0 !important;
 }
 
 div[data-testid="stMetric"] {
@@ -281,24 +536,24 @@ div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
 }
 
 button[data-baseweb="tab"] {
-    background-color: rgba(15, 23, 42, 0.7) !important;
-    border: 1px solid rgba(148, 163, 184, 0.14) !important;
+    background-color: rgba(15, 23, 42, 0.78) !important;
+    border: 1px solid rgba(148, 163, 184, 0.18) !important;
     border-radius: 10px 10px 0 0 !important;
-    color: #94a3b8 !important;
+    color: #cbd5e1 !important;
     font-weight: 600 !important;
     padding: 10px 18px !important;
     margin-right: 6px !important;
 }
 
 button[data-baseweb="tab"][aria-selected="true"] {
-    background-color: rgba(20, 184, 166, 0.16) !important;
-    border-color: rgba(20, 184, 166, 0.5) !important;
-    color: #5eead4 !important;
+    background-color: rgba(20, 184, 166, 0.20) !important;
+    border-color: rgba(45, 212, 191, 0.6) !important;
+    color: #ffffff !important;
 }
 
 .stMain .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #0d9488, #14b8a6);
-    color: #06202a;
+    color: #ffffff;
     font-weight: 700;
     border: none;
     border-radius: 9px;
@@ -306,16 +561,15 @@ button[data-baseweb="tab"][aria-selected="true"] {
 
 .stMain .stButton > button[kind="primary"]:hover {
     background: linear-gradient(135deg, #14b8a6, #2dd4bf);
-    color: #041820;
+    color: #ffffff;
 }
 
 .stMain .stButton > button {
     border-radius: 9px;
-    border: 1px solid rgba(148, 163, 184, 0.22);
+    border: 1px solid rgba(148, 163, 184, 0.24);
     font-weight: 500;
 }
 
-/* Roster Green Found & Red Not Found buttons */
 div[class*="st-key-roster_found_"] button {
     background: linear-gradient(135deg, #15803d, #22c55e) !important;
     color: #ffffff !important;
@@ -345,7 +599,7 @@ div[class*="st-key-roster_not_found_"] button:hover {
 }
 
 .form-panel {
-    background: rgba(17, 24, 39, 0.86);
+    background: rgba(17, 24, 39, 0.88);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 14px;
     padding: 18px 20px;
@@ -408,6 +662,17 @@ div[class*="st-key-roster_not_found_"] button:hover {
     border: 1px solid rgba(56, 189, 248, 0.3);
 }
 
+.date-pill {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(56, 189, 248, 0.14);
+    color: #7dd3fc;
+    border: 1px solid rgba(56, 189, 248, 0.30);
+}
+
 .found-pill {
     display: inline-block;
     padding: 2px 10px;
@@ -451,6 +716,248 @@ div[class*="st-key-roster_not_found_"] button:hover {
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
+def get_auth_secret() -> str:
+    try:
+        if "AUTH_SECRET" in st.secrets and str(st.secrets["AUTH_SECRET"]).strip():
+            return str(st.secrets["AUTH_SECRET"]).strip()
+    except Exception:
+        pass
+    env_sec = os.environ.get("TIMESH_AUTH_SECRET", "").strip()
+    if env_sec:
+        return env_sec
+    return hashlib.sha256(f"timesh-persistent-session-{SPREADSHEET_NAME}".encode("utf-8")).hexdigest()
+
+
+def build_auth_token(username: str, role: str) -> str:
+    u_clean = str(username or "").strip().lower()
+    r_clean = str(role or "user").strip().lower()
+    payload = f"{u_clean}:{r_clean}"
+    sig = hmac.new(get_auth_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+    return f"{u_clean}.{r_clean}.{sig}"
+
+
+def verify_auth_token(token: str, users_map: dict) -> dict | None:
+    tok = str(token or "").strip()
+    parts = tok.split(".")
+    if len(parts) != 3:
+        return None
+    u_clean, r_clean, sig = parts[0].strip().lower(), parts[1].strip().lower(), parts[2].strip()
+    u_rec = users_map.get(u_clean)
+    if not u_rec:
+        return None
+    actual_role = str(u_rec.get("role", "user")).strip().lower()
+    if actual_role != r_clean:
+        return None
+    expected_tok = build_auth_token(u_clean, actual_role)
+    if not hmac.compare_digest(tok, expected_tok):
+        return None
+    return {
+        "username": u_clean,
+        "name": u_rec.get("name", u_clean),
+        "role": actual_role,
+    }
+
+
+def save_auth_token_to_browser(token: str):
+    safe_tok = token.replace("\\", "\\\\").replace("'", "\\'")
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                window.localStorage.setItem('timesh_auth_token', '{safe_tok}');
+                window.sessionStorage.setItem('timesh_auth_token', '{safe_tok}');
+                document.cookie = 'timesh_auth_token=' + encodeURIComponent('{safe_tok}') + '; path=/; max-age=2592000; SameSite=Lax';
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def clear_auth_token_from_browser():
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                window.localStorage.removeItem('timesh_auth_token');
+                window.sessionStorage.removeItem('timesh_auth_token');
+                document.cookie = 'timesh_auth_token=; path=/; max-age=0; SameSite=Lax';
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def restore_auth_token_from_browser():
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                if (window.__timeshAuthRestoreDone) return;
+                window.__timeshAuthRestoreDone = true;
+                var tok = '';
+                try { tok = window.localStorage.getItem('timesh_auth_token') || ''; } catch (e) {}
+                if (!tok) {
+                    try { tok = window.sessionStorage.getItem('timesh_auth_token') || ''; } catch (e) {}
+                }
+                if (!tok && document.cookie) {
+                    var m = document.cookie.match(/(?:^|; )timesh_auth_token=([^;]*)/);
+                    if (m && m[1]) tok = decodeURIComponent(m[1]);
+                }
+                if (tok) {
+                    var p = window.parent || window;
+                    var u = new URL(p.location.href);
+                    if (u.searchParams.get('auth') !== tok) {
+                        u.searchParams.set('auth', tok);
+                        p.location.replace(u.toString());
+                    }
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def get_current_ist_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+def get_active_slot_for_now(now_dt: datetime, slots: list):
+    now_mins = now_dt.hour * 60 + now_dt.minute
+    active_slot = None
+    for hr, mn in sorted(slots):
+        slot_mins = hr * 60 + mn
+        if now_mins >= slot_mins:
+            active_slot = (hr, mn)
+    return active_slot
+
+
+def format_slot_label(slot_tuple) -> str:
+    if not slot_tuple:
+        return ""
+    dt_obj = datetime(2026, 1, 1, slot_tuple[0], slot_tuple[1])
+    return dt_obj.strftime("%I:%M %p").lstrip("0")
+
+
+def trigger_browser_notifications(alerts: list, slot_tag: str):
+    if not alerts:
+        return
+    payload_items = [
+        {"title": a["title"], "body": a["body"], "tag": f"{slot_tag}_{i}"}
+        for i, a in enumerate(alerts[:6])
+    ]
+    js_json = json.dumps(payload_items)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const items = {js_json};
+            if (!("Notification" in window)) return;
+            const showAll = () => {{
+                items.forEach((it) => {{
+                    try {{
+                        const n = new Notification(it.title, {{ body: it.body, tag: it.tag }});
+                        setTimeout(() => n.close(), 12000);
+                    }} catch (e) {{}}
+                }});
+            }};
+            if (Notification.permission === "granted") {{
+                showAll();
+            }} else if (Notification.permission !== "denied") {{
+                Notification.requestPermission().then((perm) => {{
+                    if (perm === "granted") showAll();
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def collect_scheduled_notifications(leave_rows: list, dnp_rows: list, now_dt: datetime) -> list:
+    today_d = now_dt.date()
+    target_from_date = today_d + timedelta(days=1)
+
+    active_dnp_slot = get_active_slot_for_now(now_dt, DNP_NOTIFY_SLOTS)
+    active_leave_slot = get_active_slot_for_now(now_dt, LEAVE_NOTIFY_SLOTS)
+
+    notifications = []
+
+    if active_dnp_slot is not None:
+        dnp_slot_label = format_slot_label(active_dnp_slot)
+        for r in (dnp_rows or []):
+            from_dt = parse_sheet_date(
+                resolve_field_value(r, "Do Not Punch From") or r.get("Do Not Punch From", "")
+            )
+            if from_dt == target_from_date:
+                emp_name = resolve_field_value(r, "EMP_Name") or resolve_field_value(r, "Emp_Name") or "-"
+                emp_code = resolve_field_value(r, "EMP_Code") or "-"
+                dept = resolve_field_value(r, "Emp_Department") or "-"
+                upto_str = resolve_field_value(r, "Do Not Punch Upto") or r.get("Do Not Punch Upto", "") or "-"
+                slot_key = f"dnp_{today_d.isoformat()}_{active_dnp_slot[0]:02d}{active_dnp_slot[1]:02d}_row{r.get('_sheet_row')}"
+                notifications.append({
+                    "key": slot_key,
+                    "kind": "Do Not Punch",
+                    "slot_label": dnp_slot_label,
+                    "title": f"Do Not Punch Alert ({dnp_slot_label})",
+                    "body": f"{emp_name} ({emp_code}, {dept}) — Do Not Punch starts tomorrow ({target_from_date.isoformat()}) Upto {upto_str}.",
+                })
+
+    if active_leave_slot is not None:
+        leave_slot_label = format_slot_label(active_leave_slot)
+        for r in (leave_rows or []):
+            from_dt = parse_sheet_date(
+                resolve_field_value(r, "From") or r.get("From", "")
+            )
+            if from_dt == target_from_date:
+                emp_name = resolve_field_value(r, "Emp_Name") or resolve_field_value(r, "EMP_Name") or "-"
+                emp_code = resolve_field_value(r, "EMP_Code") or "-"
+                dept = resolve_field_value(r, "Emp_Department") or "-"
+                ltype = resolve_field_value(r, "Leave_types") or "-"
+                upto_str = resolve_field_value(r, "Upto") or r.get("Upto", "") or "-"
+                slot_key = f"leave_{today_d.isoformat()}_{active_leave_slot[0]:02d}{active_leave_slot[1]:02d}_row{r.get('_sheet_row')}"
+                notifications.append({
+                    "key": slot_key,
+                    "kind": "Leave",
+                    "slot_label": leave_slot_label,
+                    "title": f"Leave Alert ({leave_slot_label})",
+                    "body": f"{emp_name} ({emp_code}, {dept}) — {ltype} Leave starts tomorrow ({target_from_date.isoformat()}) Upto {upto_str}.",
+                })
+
+    return notifications
+
+
+def find_nearest_upcoming_roster_date(date_strings: list, reference_date: date):
+    parsed_pairs = []
+    for ds in (date_strings or []):
+        dt = parse_sheet_date(ds)
+        if dt is not None:
+            parsed_pairs.append((dt, ds))
+    if not parsed_pairs:
+        return None
+
+    upcoming_or_today = [item for item in parsed_pairs if item[0] >= reference_date]
+    if upcoming_or_today:
+        upcoming_or_today.sort(key=lambda x: x[0])
+        return upcoming_or_today[0][1]
+
+    parsed_pairs.sort(key=lambda x: x[0])
+    return parsed_pairs[-1][1]
+
+
 def inject_auto_refresh(interval_seconds: int = AUTO_REFRESH_SECONDS, enabled: bool = False):
     if not enabled or interval_seconds <= 0:
         return
@@ -459,15 +966,24 @@ def inject_auto_refresh(interval_seconds: int = AUTO_REFRESH_SECONDS, enabled: b
         f"""
         <script>
         (function() {{
-            if (window.__timeshRefreshTimer) {{
-                clearTimeout(window.__timeshRefreshTimer);
+            const win = window.parent || window;
+            if (win.__timeshSoftTimer) {{
+                clearInterval(win.__timeshSoftTimer);
             }}
-            window.__timeshRefreshTimer = setTimeout(function() {{
+            win.__timeshSoftTimer = setInterval(function() {{
                 try {{
-                    window.parent.location.reload();
-                }} catch (e) {{
-                    window.location.reload();
-                }}
+                    const doc = win.document;
+                    const rerunBtn = Array.from(doc.querySelectorAll('button')).find(
+                        (b) => (b.innerText || '').trim().toLowerCase() === 'rerun'
+                    );
+                    if (rerunBtn) {{
+                        rerunBtn.click();
+                        return;
+                    }}
+                    doc.dispatchEvent(new KeyboardEvent('keydown', {{
+                        key: 'r', code: 'KeyR', bubbles: true, cancelable: true
+                    }}));
+                }} catch (e) {{}}
             }}, {ms});
         }})();
         </script>
@@ -477,11 +993,12 @@ def inject_auto_refresh(interval_seconds: int = AUTO_REFRESH_SECONDS, enabled: b
     )
 
 
-def render_banner(title, subtitle):
+def render_banner(title, subtitle=""):
+    meta_html = f"<div class='page-banner-meta'>{subtitle}</div>" if subtitle else ""
     st.markdown(
         f"<div class='page-banner'>"
         f"<div class='page-banner-title'>{html.escape(title)}</div>"
-        f"<div class='page-banner-meta'>{subtitle}</div>"
+        f"{meta_html}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -489,6 +1006,28 @@ def render_banner(title, subtitle):
 
 @st.cache_resource
 def get_gspread_client():
+    if "TOKEN_JSON" in st.secrets:
+        raw_token = st.secrets["TOKEN_JSON"]
+        token_info = json.loads(raw_token) if isinstance(raw_token, str) else dict(raw_token)
+
+        if "CREDENTIALS_JSON" in st.secrets:
+            raw_cred = st.secrets["CREDENTIALS_JSON"]
+            cred_info = json.loads(raw_cred) if isinstance(raw_cred, str) else dict(raw_cred)
+            installed = cred_info.get("installed") or cred_info.get("web") or {}
+            token_info.setdefault("client_id", installed.get("client_id", ""))
+            token_info.setdefault("client_secret", installed.get("client_secret", ""))
+            token_info.setdefault("token_uri", installed.get("token_uri", "https://oauth2.googleapis.com/token"))
+
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+        return gspread.authorize(creds)
+
+    if "gcp_service_account" in st.secrets:
+        sa_info = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_service_account_info(sa_info, scopes=SCOPES)
+        return gspread.authorize(creds)
+
     creds = None
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -496,6 +1035,10 @@ def get_gspread_client():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            if not os.path.exists(CREDENTIALS_FILE):
+                raise FileNotFoundError(
+                    "No 'credentials.json' found and no 'TOKEN_JSON' found in Streamlit Secrets."
+                )
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
         with open(TOKEN_FILE, "w", encoding="utf-8") as token:
@@ -670,15 +1213,20 @@ def get_all_tab_names(sheet_name):
 
 
 def parse_sheet_date(raw_val):
-    s = str(raw_val).strip()
+    s = str(raw_val or "").strip()
     if not s:
         return None
-    date_part = s.split(" ")[0].strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d.%m.%Y", "%d-%b-%Y", "%d %b %Y", "%d %B %Y"):
-        try:
-            return datetime.strptime(date_part, fmt).date()
-        except ValueError:
-            continue
+    formats = (
+        "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
+        "%d.%m.%Y", "%d-%b-%Y", "%d %b %Y", "%d %B %Y",
+        "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S",
+    )
+    for candidate in (s, s.split(" ")[0]):
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     return None
 
 
@@ -724,6 +1272,39 @@ def get_dnp_recent_sort_key(row):
     secondary_dt = upto_dt or from_dt or notif_dt
     has_date = 1 if (primary_dt is not None or secondary_dt is not None) else 0
     return (has_date, primary_dt.toordinal() if primary_dt else -1, secondary_dt.toordinal() if secondary_dt else -1, row.get("_sheet_row", 0))
+
+
+def count_upcoming_leaves(leave_rows, today_date: date) -> int:
+    if not leave_rows:
+        return 0
+    count = 0
+    for r in leave_rows:
+        upto_dt = parse_sheet_date(r.get("Upto", ""))
+        if upto_dt is not None and upto_dt >= today_date:
+            count += 1
+    return count
+
+
+def count_active_dnp(dnp_rows, today_date: date) -> int:
+    if not dnp_rows:
+        return 0
+    active_count = 0
+    for r in dnp_rows:
+        upto_dt = parse_sheet_date(
+            resolve_field_value(r, "Do Not Punch Upto") or r.get("Do Not Punch Upto", "")
+        )
+        from_dt = parse_sheet_date(
+            resolve_field_value(r, "Do Not Punch From") or r.get("Do Not Punch From", "")
+        )
+        if upto_dt is not None:
+            if upto_dt >= today_date:
+                active_count += 1
+        elif from_dt is not None:
+            if from_dt >= today_date:
+                active_count += 1
+        else:
+            active_count += 1
+    return active_count
 
 
 def get_next_sl_number(rows, sl_column="SL"):
@@ -814,11 +1395,21 @@ def resolve_field_value(row_dict, target_header):
     return ""
 
 
+def get_roster_row_date_str(row_dict: dict) -> str:
+    val = (
+        resolve_field_value(row_dict, "Date")
+        or resolve_field_value(row_dict, "Roster_Date")
+        or resolve_field_value(row_dict, "Attendance_Date")
+    )
+    return val.strip()
+
+
 def get_roster_found_status(row_dict: dict) -> str:
     val = (
         resolve_field_value(row_dict, ROSTER_STATUS_COLUMN)
         or resolve_field_value(row_dict, "Found / Not Found")
         or resolve_field_value(row_dict, "Roster_Status")
+        or resolve_field_value(row_dict, "Status")
     )
     low = val.strip().lower()
     if low in {"found", "yes", "present", "ok", "true"}:
@@ -834,6 +1425,12 @@ def get_roster_target_col(sheet_name, tab_name):
     ws = sh.worksheet(tab_name)
     first_row = ws.row_values(1)
     headers = [str(h).strip() for h in first_row]
+
+    for idx, h in enumerate(headers, start=1):
+        norm_h = re.sub(r"[^a-z0-9]", "", h.lower())
+        if norm_h in {"foundstatus", "foundnotfound", "rosterstatus"}:
+            return idx, h
+
     date_cols = []
     for idx, h in enumerate(headers, start=1):
         dt = parse_sheet_date(h)
@@ -844,45 +1441,21 @@ def get_roster_target_col(sheet_name, tab_name):
         return date_cols[-1][1], headers[date_cols[-1][1] - 1]
 
     for idx, h in enumerate(headers, start=1):
-        norm_h = re.sub(r"[^a-z0-9]", "", h.lower())
-        if norm_h in {"foundstatus", "foundnotfound", "rosterstatus", "status"}:
-            return idx, h
+        if re.sub(r"[^a-z0-9]", "", h.lower()) == "date":
+            if idx < len(headers):
+                return idx + 1, headers[idx]
+            new_col_idx = len(headers) + 1
+            ws.update_cell(1, new_col_idx, ROSTER_STATUS_COLUMN)
+            return new_col_idx, ROSTER_STATUS_COLUMN
 
     fallback_idx = max(len(headers), 1)
     fallback_name = headers[fallback_idx - 1] if headers else ROSTER_STATUS_COLUMN
     return fallback_idx, fallback_name
 
 
-def get_roster_date_column_index(headers: list) -> int:
-    date_cols = []
-    for idx, h in enumerate(headers, start=1):
-        dt = parse_sheet_date(str(h).strip())
-        if dt is not None:
-            date_cols.append((dt, idx))
-    if date_cols:
-        date_cols.sort(key=lambda x: x[0])
-        return date_cols[-1][1]
-    for idx, h in enumerate(headers, start=1):
-        norm_h = re.sub(r"[^a-z0-9]", "", str(h).lower())
-        if norm_h in {"foundstatus", "foundnotfound", "rosterstatus", "status"}:
-            return idx
-    return max(len(headers), 1)
-
-
 def get_roster_line_status(row_dict: dict, headers: list) -> str:
     if "_override_status" in row_dict and row_dict["_override_status"]:
         return row_dict["_override_status"]
-    date_col_idx = get_roster_date_column_index(headers)
-    if 1 <= date_col_idx <= len(headers):
-        col_name = headers[date_col_idx - 1]
-        val = str(row_dict.get(col_name, "")).strip()
-        low = val.lower()
-        if low in {"found", "yes", "present", "ok", "true"}:
-            return "Found"
-        if low in {"not found", "notfound", "no", "absent", "false"}:
-            return "Not Found"
-        if val:
-            return val
     return get_roster_found_status(row_dict)
 
 
@@ -891,6 +1464,7 @@ def save_roster_found_status_instant(sheet_name, tab_name, sheet_row, status_val
     ws = sh.worksheet(tab_name)
     col_idx, col_name = get_roster_target_col(sheet_name, tab_name)
     ws.update_cell(int(sheet_row), int(col_idx), str(status_value).strip())
+    clear_sheet_cache()
     return col_name
 
 
@@ -904,43 +1478,72 @@ def roster_sl_sort_key(row_dict: dict):
     return (2, 0, "", row_dict.get("_sheet_row", 0))
 
 
-def compute_roster_present_bonus(roster_rows, emp_code: str, emp_name: str, as_of_date: date) -> int:
+def compute_roster_present_bonus(roster_rows, roster_headers, emp_code: str, emp_name: str, as_of_date: date) -> int:
     if not roster_rows:
         return 0
-    norm_code = str(emp_code or "").strip().lower()
+
+    norm_code = re.sub(r"\s+", "", str(emp_code or "").strip()).lower()
     norm_name = re.sub(r"\s+", " ", str(emp_name or "").strip()).lower()
-    cap_dt = min(as_of_date, YEAR_END_CAP)
-    bonus = 0
+    cap_dt = max(min(as_of_date, YEAR_END_CAP), YEAR_END_CAP)
+    bonus_dates = set()
+    present_values = {"found", "yes", "present", "ok", "true", "1"}
+
     for rr in roster_rows:
-        r_code = resolve_field_value(rr, "EMP_Code").lower()
-        r_name = re.sub(r"\s+", " ", (resolve_field_value(rr, "EMP_Name") or resolve_field_value(rr, "Emp_Name")).lower())
-        matched = (norm_code and r_code and r_code == norm_code) or ((not norm_code or not r_code) and norm_name and r_name == norm_name)
-        if not matched or get_roster_found_status(rr) == "Not Found":
+        r_code = re.sub(r"\s+", "", resolve_field_value(rr, "EMP_Code")).lower()
+        r_name = re.sub(
+            r"\s+", " ",
+            (resolve_field_value(rr, "EMP_Name") or resolve_field_value(rr, "Emp_Name")).lower(),
+        )
+        matched = (
+            (bool(norm_code) and bool(r_code) and r_code == norm_code)
+            or ((not norm_code or not r_code) and bool(norm_name) and r_name == norm_name)
+        )
+        if not matched:
             continue
-        raw_status = (resolve_field_value(rr, "Attendance_Status") or resolve_field_value(rr, "Status") or resolve_field_value(rr, "Present")).strip().lower()
-        if raw_status in {"absent", "a", "leave", "l", "no", "off", "holiday", "not found"}:
-            continue
-        r_date = parse_sheet_date(resolve_field_value(rr, "Date")) or parse_sheet_date(resolve_field_value(rr, "Roster_Date")) or parse_sheet_date(resolve_field_value(rr, "From"))
-        if r_date and PROJECTION_START <= r_date <= cap_dt and (r_date.weekday() == 6 or r_date in NATIONAL_HOLIDAYS_2026):
-            bonus += 1
-    return bonus
+
+        row_dt = parse_sheet_date(get_roster_row_date_str(rr))
+        if row_dt and (PROJECTION_START <= row_dt <= cap_dt):
+            if row_dt.weekday() == 6 or row_dt in NATIONAL_HOLIDAYS_2026:
+                st_val = get_roster_found_status(rr).strip().lower()
+                if st_val in present_values:
+                    bonus_dates.add(row_dt)
+                else:
+                    for k, v in rr.items():
+                        if k == "_sheet_row":
+                            continue
+                        if str(v or "").strip().lower() in present_values:
+                            bonus_dates.add(row_dt)
+                            break
+
+        for header in (roster_headers or []):
+            roster_date = parse_sheet_date(header)
+            if not roster_date or not (PROJECTION_START <= roster_date <= cap_dt):
+                continue
+            if roster_date.weekday() != 6 and roster_date not in NATIONAL_HOLIDAYS_2026:
+                continue
+            status = resolve_field_value(rr, header).strip().lower()
+            if status in present_values:
+                bonus_dates.add(roster_date)
+
+    return len(bonus_dates)
 
 
 def compute_faculty_working_and_present(
     emp_code: str, emp_name: str, sheet8_rows: list, leave_rows: list, dnp_rows: list,
     roster_rows: list = None, as_of_date: date = None, holidays: set = None,
+    roster_headers: list = None,
 ) -> dict:
     if as_of_date is None:
         as_of_date = date.today()
     if holidays is None:
         holidays = NATIONAL_HOLIDAYS_2026
 
-    norm_code = str(emp_code or "").strip().lower()
+    norm_code = re.sub(r"\s+", "", str(emp_code or "").strip()).lower()
     norm_name = re.sub(r"\s+", " ", str(emp_name or "").strip()).lower()
 
     matched_s8 = None
     for sr in sheet8_rows:
-        s_code = resolve_field_value(sr, "EMP_Code").lower()
+        s_code = re.sub(r"\s+", "", resolve_field_value(sr, "EMP_Code")).lower()
         s_name = re.sub(r"\s+", " ", (resolve_field_value(sr, "EMP_Name") or resolve_field_value(sr, "Emp_Name")).lower())
         if (norm_code and s_code and s_code == norm_code) or ((not norm_code or not s_code) and norm_name and s_name == norm_name):
             matched_s8 = sr
@@ -962,7 +1565,7 @@ def compute_faculty_working_and_present(
 
     fac_leave_intervals = []
     for lr in leave_rows:
-        l_code = resolve_field_value(lr, "EMP_Code").lower()
+        l_code = re.sub(r"\s+", "", resolve_field_value(lr, "EMP_Code")).lower()
         l_name = re.sub(r"\s+", " ", (resolve_field_value(lr, "Emp_Name") or resolve_field_value(lr, "EMP_Name")).lower())
         if (norm_code and l_code and l_code == norm_code) or ((not norm_code or not l_code) and norm_name and l_name == norm_name):
             lf, lu = parse_sheet_date(resolve_field_value(lr, "From")), parse_sheet_date(resolve_field_value(lr, "Upto"))
@@ -971,7 +1574,7 @@ def compute_faculty_working_and_present(
 
     fac_dnp_intervals = []
     for dr in dnp_rows:
-        d_code = resolve_field_value(dr, "EMP_Code").lower()
+        d_code = re.sub(r"\s+", "", resolve_field_value(dr, "EMP_Code")).lower()
         d_name = re.sub(r"\s+", " ", (resolve_field_value(dr, "EMP_Name") or resolve_field_value(dr, "Emp_Name")).lower())
         if (norm_code and d_code and d_code == norm_code) or ((not norm_code or not d_code) and norm_name and d_name == norm_name):
             df, du = parse_sheet_date(resolve_field_value(dr, "Do Not Punch From")), parse_sheet_date(resolve_field_value(dr, "Do Not Punch Upto"))
@@ -981,19 +1584,20 @@ def compute_faculty_working_and_present(
     effective_end = min(as_of_date, YEAR_END_CAP)
     added_working_days = 0
     excluded_leave_dnp_days = 0
-    skipped_sundays_holidays = 0
 
     curr_dt = PROJECTION_START
     while curr_dt <= effective_end:
         if curr_dt.weekday() == 6 or curr_dt in holidays:
-            skipped_sundays_holidays += 1
+            pass
         elif any(is_date_in_range(curr_dt, lf, lu) for lf, lu in fac_leave_intervals) or any(is_date_in_range(curr_dt, df, du) for df, du in fac_dnp_intervals):
             excluded_leave_dnp_days += 1
         else:
             added_working_days += 1
         curr_dt += timedelta(days=1)
 
-    roster_present_bonus = compute_roster_present_bonus(roster_rows or [], emp_code, emp_name, effective_end)
+    roster_present_bonus = compute_roster_present_bonus(
+        roster_rows or [], roster_headers or [], emp_code, emp_name, effective_end
+    )
 
     return {
         "Found in Sheet8": "Yes" if found_in_sheet8 else "No (0 Base)",
@@ -1084,11 +1688,15 @@ def render_html_table(rows, max_rows=300):
 
 
 def make_slice_url(field_name, label_val):
-    qs = urllib.parse.urlencode({
+    params = {
         "slice": "Analytics Dashboard",
         "pie_field": field_name,
         "pie_val": label_val,
-    })
+    }
+    curr_auth = str(st.session_state.get("persistent_auth_token") or st.query_params.get("auth") or "").strip()
+    if curr_auth:
+        params["auth"] = curr_auth
+    qs = urllib.parse.urlencode(params)
     return f"?{qs}"
 
 
@@ -1296,12 +1904,6 @@ def build_leave_suggestions(leave_rows, today_date):
     return suggestions
 
 
-def build_auth_token(username: str, password_hash: str) -> str:
-    msg = f"{username.strip().lower()}:{password_hash.strip()}"
-    return hmac.new(b"timesh_session_key_2026", msg.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-# ================= ENSURE SYSTEM SHEETS & LOAD USERS =================
 try:
     ensure_system_tabs(SPREADSHEET_NAME)
     sheet_users_db = load_users_from_sheet(SPREADSHEET_NAME)
@@ -1314,30 +1916,39 @@ if not sheet_users_db:
 
 if "logged_in_user" not in st.session_state:
     st.session_state["logged_in_user"] = None
+if "explicit_logout" not in st.session_state:
+    st.session_state["explicit_logout"] = False
+if "persistent_auth_token" not in st.session_state:
+    st.session_state["persistent_auth_token"] = ""
 if "auto_refresh_enabled" not in st.session_state:
-    st.session_state["auto_refresh_enabled"] = False
+    st.session_state["auto_refresh_enabled"] = True
 if "roster_status_overrides" not in st.session_state:
     st.session_state["roster_status_overrides"] = {}
+if "upcoming_leave_ok_map" not in st.session_state:
+    st.session_state["upcoming_leave_ok_map"] = {}
+if "dismissed_notifications" not in st.session_state:
+    st.session_state["dismissed_notifications"] = set()
+if "toasted_notifications" not in st.session_state:
+    st.session_state["toasted_notifications"] = set()
 
-qp_auth_u = str(st.query_params.get("auth_u", "")).strip().lower()
-qp_auth_t = str(st.query_params.get("auth_t", "")).strip()
+# Restore persistent login session from URL query param or browser storage (until explicit logout)
+qp_auth = str(st.query_params.get("auth", "")).strip()
+if st.session_state["logged_in_user"] is None and not st.session_state["explicit_logout"]:
+    candidate_tok = qp_auth or str(st.session_state.get("persistent_auth_token") or "").strip()
+    restored_user = verify_auth_token(candidate_tok, sheet_users_db) if candidate_tok else None
+    if restored_user:
+        st.session_state["logged_in_user"] = restored_user
+        st.session_state["persistent_auth_token"] = build_auth_token(restored_user["username"], restored_user["role"])
+        st.query_params["auth"] = st.session_state["persistent_auth_token"]
+    elif not qp_auth:
+        restore_auth_token_from_browser()
 
-if st.session_state["logged_in_user"] is None and qp_auth_u and qp_auth_t:
-    u_match = sheet_users_db.get(qp_auth_u)
-    if u_match and hmac.compare_digest(qp_auth_t, build_auth_token(qp_auth_u, u_match["password_hash"])):
-        st.session_state["logged_in_user"] = {
-            "username": qp_auth_u,
-            "name": u_match["name"],
-            "role": u_match["role"],
-        }
-
-# ================= MINIMAL LOGIN SCREEN =================
 if st.session_state["logged_in_user"] is None:
-    inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
     st.markdown(
         "<div class='login-minimal-brand'>"
+        "<div class='login-minimal-logo'>🎓</div>"
         "<div class='login-minimal-title'>TIMESH</div>"
-        "<div class='login-minimal-sub'>facuty mangment</div>"
+        "<div class='login-minimal-sub'>Faculty Management</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1351,14 +1962,19 @@ if st.session_state["logged_in_user"] is None:
         if submitted:
             u_rec = sheet_users_db.get(login_username)
             if u_rec and verify_password(login_password, u_rec["password_hash"]):
+                if not str(u_rec["password_hash"]).startswith("pbkdf2_sha256$"):
+                    update_user_password_in_sheet(SPREADSHEET_NAME, login_username, login_password)
                 logged_user_obj = {
                     "username": login_username,
                     "name": u_rec["name"],
                     "role": u_rec["role"],
                 }
+                token_str = build_auth_token(login_username, u_rec["role"])
                 st.session_state["logged_in_user"] = logged_user_obj
-                st.query_params["auth_u"] = login_username
-                st.query_params["auth_t"] = build_auth_token(login_username, u_rec["password_hash"])
+                st.session_state["explicit_logout"] = False
+                st.session_state["persistent_auth_token"] = token_str
+                st.query_params["auth"] = token_str
+                save_auth_token_to_browser(token_str)
                 write_activity_log(
                     SPREADSHEET_NAME,
                     logged_user_obj,
@@ -1381,6 +1997,11 @@ if st.session_state["logged_in_user"] is None:
 current_user = st.session_state["logged_in_user"]
 is_admin_user = current_user.get("role") == "admin"
 
+active_token = str(st.session_state.get("persistent_auth_token") or build_auth_token(current_user["username"], current_user["role"]))
+st.session_state["persistent_auth_token"] = active_token
+if st.query_params.get("auth") != active_token:
+    st.query_params["auth"] = active_token
+
 q_params = st.query_params
 qp_slice = str(q_params.get("slice", "")).strip()
 qp_field = str(q_params.get("pie_field", "")).strip()
@@ -1391,7 +2012,10 @@ if "active_nav_slice" not in st.session_state:
     st.session_state["active_nav_slice"] = qp_slice if qp_slice in valid_nav_keys else "Analytics Dashboard"
 elif qp_slice in valid_nav_keys and qp_slice != st.session_state.get("_last_qp_slice"):
     st.session_state["active_nav_slice"] = qp_slice
+elif st.session_state.get("active_nav_slice") not in valid_nav_keys:
+    st.session_state["active_nav_slice"] = "Analytics Dashboard"
 st.session_state["_last_qp_slice"] = qp_slice
+st.query_params["slice"] = st.session_state["active_nav_slice"]
 
 try:
     all_tabs = get_all_tab_names(SPREADSHEET_NAME)
@@ -1412,6 +2036,24 @@ dnp_tab = next((t for t in dnp_tab_candidates if t in all_tabs), None)
 
 attendance_base_tab = next((t for t in ATTENDANCE_BASE_TAB_CANDIDATES if t in all_tabs), None)
 
+now_ist = get_current_ist_now()
+today_now = now_ist.date()
+
+try:
+    _, nav_leave_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, leave_tab) if leave_tab else ([], [])
+    upcoming_leave_count = count_upcoming_leaves(nav_leave_rows, today_now)
+except Exception:
+    nav_leave_rows = []
+    upcoming_leave_count = 0
+
+target_dnp_nav_tab = dnp_tab or "Don Not Punch"
+try:
+    _, nav_dnp_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, target_dnp_nav_tab) if target_dnp_nav_tab in all_tabs else ([], [])
+    active_dnp_count = count_active_dnp(nav_dnp_rows, today_now)
+except Exception:
+    nav_dnp_rows = []
+    active_dnp_count = 0
+
 pending_notices_list = []
 if is_admin_user and st.session_state.get("active_nav_slice") == "Users" and REQUESTS_TAB_NAME in all_tabs:
     try:
@@ -1420,12 +2062,14 @@ if is_admin_user and st.session_state.get("active_nav_slice") == "Users" and REQ
     except Exception:
         pending_notices_list = []
 
-# ================= SIDEBAR NAVIGATION =================
 with st.sidebar:
     st.markdown(
         "<div class='sidebar-brand'>"
-        "<div class='sidebar-brand-title'>🎓 TIMESH</div>"
+        "<div class='pro-logo-icon'>🎓</div>"
+        "<div>"
+        "<div class='sidebar-brand-title'>TIMESH</div>"
         "<div class='sidebar-brand-sub'>Faculty & Leave Management Suite</div>"
+        "</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1444,7 +2088,15 @@ with st.sidebar:
 
     for nav in NAV_ITEMS:
         is_curr = st.session_state["active_nav_slice"] == nav["key"]
-        nav_title = "Security" if (nav["key"] == "Users" and not is_admin_user) else nav["title"]
+        if nav["key"] == "Leave":
+            nav_title = f"Leave ({upcoming_leave_count})"
+        elif nav["key"] == "Do Not Punch":
+            nav_title = f"Do Not Punch ({active_dnp_count})"
+        elif nav["key"] == "Users" and not is_admin_user:
+            nav_title = "Security"
+        else:
+            nav_title = nav["title"]
+
         if st.button(
             f"{nav['icon']}  {nav_title}",
             key=f"nav_btn_{nav['key']}",
@@ -1459,11 +2111,7 @@ with st.sidebar:
         f"<div class='sidebar-info-box'>"
         f"<div class='sidebar-info-row'><span>User</span><span class='sidebar-info-val'>{html.escape(str(current_user.get('name', '-')))}</span></div>"
         f"<div class='sidebar-info-row'><span>Role</span><span class='sidebar-info-val'>{html.escape(str(current_user.get('role', '-')).upper())}</span></div>"
-        f"<div class='sidebar-info-row'><span>Sheet</span><span class='sidebar-info-val'>{html.escape(SPREADSHEET_NAME)}</span></div>"
-        f"<div class='sidebar-info-row'><span>Roster Tab</span><span class='sidebar-info-val'>{html.escape(str(roster_tab or 'Sheet2'))}</span></div>"
-        f"<div class='sidebar-info-row'><span>Leave Tab</span><span class='sidebar-info-val'>{html.escape(str(leave_tab or '-'))}</span></div>"
-        f"<div class='sidebar-info-row'><span>DNP Tab</span><span class='sidebar-info-val'>{html.escape(str(dnp_tab or 'Don Not Punch'))}</span></div>"
-        f"<div class='sidebar-info-row'><span>Auto Refresh</span><span class='sidebar-info-val'>Every {AUTO_REFRESH_SECONDS}s</span></div>"
+        f"<div class='sidebar-info-row'><span>IST Time</span><span class='sidebar-info-val'>{html.escape(now_ist.strftime('%I:%M %p'))}</span></div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -1488,9 +2136,85 @@ with st.sidebar:
             details=f"User '{current_user.get('username', '')}' logged out.",
         )
         st.session_state["logged_in_user"] = None
-        st.query_params.pop("auth_u", None)
-        st.query_params.pop("auth_t", None)
+        st.session_state["explicit_logout"] = True
+        st.session_state["persistent_auth_token"] = ""
+        st.query_params.pop("auth", None)
+        clear_auth_token_from_browser()
         st.rerun()
+
+# High-contrast Mobile Quick Navigation Strip (visible on phones)
+curr_slice_now = st.session_state["active_nav_slice"]
+st.markdown(
+    f"<div class='mobile-quick-header'>"
+    f"<div class='mobile-quick-brand'>"
+    f"<div class='mobile-quick-logo'>🎓</div>"
+    f"<div class='mobile-quick-title'>TIMESH</div>"
+    f"</div>"
+    f"<span class='mobile-quick-badge'>{html.escape(str(current_user.get('role', 'USER')).upper())}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+mob_r1 = st.columns(3)
+for idx_m, nav_m in enumerate(NAV_ITEMS[:3]):
+    lbl_m = f"Leave ({upcoming_leave_count})" if nav_m["key"] == "Leave" else nav_m["title"]
+    if mob_r1[idx_m].button(
+        f"{nav_m['icon']} {lbl_m}",
+        key=f"mob_nav_{nav_m['key']}",
+        type="primary" if curr_slice_now == nav_m["key"] else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["active_nav_slice"] = nav_m["key"]
+        st.query_params["slice"] = nav_m["key"]
+        st.rerun()
+
+mob_r2 = st.columns(3)
+for idx_m2, nav_m2 in enumerate(NAV_ITEMS[3:]):
+    if nav_m2["key"] == "Leave":
+        lbl_m2 = f"Leave ({upcoming_leave_count})"
+    elif nav_m2["key"] == "Do Not Punch":
+        lbl_m2 = f"DNP ({active_dnp_count})"
+    elif nav_m2["key"] == "Users" and not is_admin_user:
+        lbl_m2 = "Security"
+    else:
+        lbl_m2 = nav_m2["title"]
+    if mob_r2[idx_m2].button(
+        f"{nav_m2['icon']} {lbl_m2}",
+        key=f"mob_nav_{nav_m2['key']}",
+        type="primary" if curr_slice_now == nav_m2["key"] else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["active_nav_slice"] = nav_m2["key"]
+        st.query_params["slice"] = nav_m2["key"]
+        st.rerun()
+
+due_notifications = collect_scheduled_notifications(nav_leave_rows, nav_dnp_rows, now_ist)
+unseen_toasts = [n for n in due_notifications if n["key"] not in st.session_state["toasted_notifications"]]
+if unseen_toasts:
+    for item_n in unseen_toasts:
+        st.toast(f"🔔 {item_n['title']}: {item_n['body']}", icon="⏰")
+        st.session_state["toasted_notifications"].add(item_n["key"])
+    trigger_browser_notifications(unseen_toasts, f"timesh_{today_now.isoformat()}")
+
+visible_alerts = [n for n in due_notifications if n["key"] not in st.session_state["dismissed_notifications"]]
+if visible_alerts:
+    lines_html = "".join(
+        f"<div class='notify-alert-item'>• <b>[{html.escape(al['kind'])} · {html.escape(al['slot_label'])}]</b> {html.escape(al['body'])}</div>"
+        for al in visible_alerts
+    )
+    al_col1, al_col2 = st.columns([5.2, 1.0])
+    with al_col1:
+        st.markdown(
+            f"<div class='notify-alert-card'>"
+            f"<div class='notify-alert-title'>⏰ Scheduled Reminders ({len(visible_alerts)})</div>"
+            f"{lines_html}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with al_col2:
+        if st.button("Dismiss", key="dismiss_due_notifications_btn", use_container_width=True):
+            for al in visible_alerts:
+                st.session_state["dismissed_notifications"].add(al["key"])
+            st.rerun()
 
 inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
 
@@ -1535,7 +2259,8 @@ if slice_choice == "Analytics Dashboard":
         hdr_c1, hdr_c2 = st.columns([4, 1])
         hdr_c1.subheader(f"Filtered Records — {valid_pie_fields[qp_field]}: {qp_val} ({len(drill_rows)})")
         if hdr_c2.button("Clear Selection", use_container_width=True):
-            st.query_params.clear()
+            st.query_params.pop("pie_field", None)
+            st.query_params.pop("pie_val", None)
             st.rerun()
         render_html_table(drill_rows, max_rows=500)
 
@@ -1568,110 +2293,96 @@ elif slice_choice == "FACULTY_CORNER":
         if "selected_faculty_sheet_row" not in st.session_state:
             st.session_state["selected_faculty_sheet_row"] = None
 
-        st.markdown("<div class='form-panel'><div class='section-tag'>Search & Filter</div>", unsafe_allow_html=True)
-        f_col1, f_col2, f_col3, f_col4 = st.columns([1.8, 1.1, 1.0, 1.4])
-        search_code_name = f_col1.text_input("Search Name / EMP_Code", "", placeholder="Type name or EMP_Code...", key="view_search_code_name").strip().lower()
-        search_sl = f_col2.text_input("Search SL", "", placeholder="Type SL...", key="view_search_sl").strip().lower()
-        categories = sorted({resolve_field_value(r, "CATEGORY") for r in faculty_rows if resolve_field_value(r, "CATEGORY")})
-        sel_status = f_col3.selectbox("Status", STATUS_OPTIONS, index=STATUS_OPTIONS.index("OK"), key="view_status")
-        sel_categories = f_col4.multiselect("Category", categories, default=[], placeholder="All Categories", key="view_categories")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        selected_cat_set = {c.strip() for c in sel_categories}
-        filtered_rows = []
-        for r in faculty_rows:
-            row_status = resolve_field_value(r, "Status")
-            if sel_status == "(Blanks)" and row_status != "":
-                continue
-            elif sel_status != "All" and row_status.lower() != sel_status.lower():
-                continue
-            if selected_cat_set and resolve_field_value(r, "CATEGORY") not in selected_cat_set:
-                continue
-            if search_sl and search_sl not in resolve_field_value(r, "SL").lower():
-                continue
-            if search_code_name:
-                hay = " ".join([
-                    resolve_field_value(r, "EMP_Code"),
-                    resolve_field_value(r, "EMP_Name") or resolve_field_value(r, "Emp_Name"),
-                    resolve_field_value(r, "Emp_Designation"),
-                ]).lower()
-                if search_code_name not in hay:
-                    continue
-            filtered_rows.append(r)
-
-        dept_groups = {}
-        for r in filtered_rows:
-            dept_name = resolve_field_value(r, "Emp_Department") or "Other / Unassigned Department"
-            desig_name = resolve_field_value(r, "Emp_Designation") or "Other / Unspecified"
-            dept_groups.setdefault(dept_name, {}).setdefault(desig_name, []).append(r)
-
-        sorted_dept_names = sorted(dept_groups.keys(), key=lambda x: (x == "Other / Unassigned Department", x.lower()))
         active_dept = st.session_state.get("selected_dept_in_view")
-        if (search_code_name or search_sl) and len(sorted_dept_names) == 1:
-            active_dept = sorted_dept_names[0]
-            st.session_state["selected_dept_in_view"] = active_dept
-        elif active_dept and active_dept not in dept_groups:
-            active_dept = None
-            st.session_state["selected_dept_in_view"] = None
+        sel_row_idx = st.session_state.get("selected_faculty_sheet_row")
 
-        st.markdown("<div class='section-tag'>Departments</div>", unsafe_allow_html=True)
-        for d_start in range(0, len(sorted_dept_names), 3):
-            d_chunk = sorted_dept_names[d_start:d_start + 3]
-            d_cols = st.columns(3)
-            for offset, d_name in enumerate(d_chunk):
-                d_count = sum(len(v) for v in dept_groups[d_name].values())
-                is_open = (active_dept == d_name)
-                if d_cols[offset].button(
-                    f"🏛️ {d_name} ({d_count})",
-                    key=f"dept_select_btn_{d_start}_{offset}",
-                    type="primary" if is_open else "secondary",
-                    use_container_width=True,
-                ):
-                    st.session_state["selected_dept_in_view"] = None if is_open else d_name
-                    st.session_state["selected_faculty_sheet_row"] = None
-                    st.rerun()
+        if not active_dept:
+            st.markdown("<div class='form-panel'><div class='section-tag'>Search & Filter</div>", unsafe_allow_html=True)
+            f_col1, f_col2, f_col3, f_col4 = st.columns([1.8, 1.1, 1.0, 1.4])
+            search_code_name = f_col1.text_input("Search Name / EMP_Code", "", placeholder="Type name or EMP_Code...", key="view_search_code_name").strip().lower()
+            search_sl = f_col2.text_input("Search SL", "", placeholder="Type SL...", key="view_search_sl").strip().lower()
+            categories = sorted({resolve_field_value(r, "CATEGORY") for r in faculty_rows if resolve_field_value(r, "CATEGORY")})
+            sel_status = f_col3.selectbox("Status", STATUS_OPTIONS, index=STATUS_OPTIONS.index("OK"), key="view_status")
+            sel_categories = f_col4.multiselect("Category", categories, default=[], placeholder="All Categories", key="view_categories")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        if active_dept and active_dept in dept_groups:
-            desig_map = dept_groups[active_dept]
-            dept_total = sum(len(v) for v in desig_map.values())
-            sorted_desigs = sorted(desig_map.keys(), key=get_designation_rank)
-            sel_row_idx = st.session_state.get("selected_faculty_sheet_row")
-            selected_fac_row = next((r for r in faculty_rows if r.get("_sheet_row") == sel_row_idx), None)
+            selected_cat_set = {c.strip() for c in sel_categories}
+            filtered_rows = []
+            for r in faculty_rows:
+                row_status = resolve_field_value(r, "Status")
+                if sel_status == "(Blanks)" and row_status != "":
+                    continue
+                elif sel_status != "All" and row_status.lower() != sel_status.lower():
+                    continue
+                if selected_cat_set and resolve_field_value(r, "CATEGORY") not in selected_cat_set:
+                    continue
+                if search_sl and search_sl not in resolve_field_value(r, "SL").lower():
+                    continue
+                if search_code_name:
+                    hay = " ".join([
+                        resolve_field_value(r, "EMP_Code"),
+                        resolve_field_value(r, "EMP_Name") or resolve_field_value(r, "Emp_Name"),
+                        resolve_field_value(r, "Emp_Designation"),
+                    ]).lower()
+                    if search_code_name not in hay:
+                        continue
+                filtered_rows.append(r)
 
-            st.markdown("<div class='dept-open-panel'>", unsafe_allow_html=True)
-            dh1, dh2 = st.columns([4.5, 1])
-            dh1.markdown(
-                f"<div class='section-tag'>Selected Department</div>"
-                f"<div style='font-size:20px;font-weight:700;color:#f8fafc;'>🏛️ {html.escape(active_dept)} "
-                f"<span style='font-size:13px;color:#5eead4;font-weight:600;'>({dept_total} Faculty)</span></div>",
-                unsafe_allow_html=True,
-            )
-            if dh2.button("✖ Close Dept", key="close_active_dept_btn", use_container_width=True):
-                st.session_state["selected_dept_in_view"] = None
+            dept_groups = {}
+            for r in filtered_rows:
+                dept_name = resolve_field_value(r, "Emp_Department") or "Other / Unassigned Department"
+                desig_name = resolve_field_value(r, "Emp_Designation") or "Other / Unspecified"
+                dept_groups.setdefault(dept_name, {}).setdefault(desig_name, []).append(r)
+
+            sorted_dept_names = sorted(dept_groups.keys(), key=lambda x: (x == "Other / Unassigned Department", x.lower()))
+
+            if (search_code_name or search_sl) and len(sorted_dept_names) == 1:
+                st.session_state["selected_dept_in_view"] = sorted_dept_names[0]
                 st.session_state["selected_faculty_sheet_row"] = None
                 st.rerun()
 
-            for desig_name in sorted_desigs:
-                fac_list = sorted(desig_map[desig_name], key=lambda x: (resolve_field_value(x, "EMP_Name") or resolve_field_value(x, "Emp_Name")).lower())
-                st.markdown(f"<div class='desig-sub-label'>{html.escape(desig_name)} ({len(fac_list)})</div>", unsafe_allow_html=True)
-                for start_i in range(0, len(fac_list), 4):
-                    chunk = fac_list[start_i:start_i + 4]
-                    btn_cols = st.columns(4)
-                    for col_offset, f_row in enumerate(chunk):
-                        f_sheet_row = f_row["_sheet_row"]
-                        f_name = resolve_field_value(f_row, "EMP_Name") or resolve_field_value(f_row, "Emp_Name") or "Unnamed"
-                        f_code = resolve_field_value(f_row, "EMP_Code")
-                        f_sl = resolve_field_value(f_row, "SL")
-                        meta_parts = [p for p in [f_code, f"SL:{f_sl}" if f_sl else ""] if p]
-                        meta_txt = f" ({', '.join(meta_parts)})" if meta_parts else ""
-                        if btn_cols[col_offset].button(
-                            f"👤 {f_name}{meta_txt}",
-                            key=f"fac_in_dept_btn_{f_sheet_row}",
-                            type="primary" if sel_row_idx == f_sheet_row else "secondary",
-                            use_container_width=True,
-                        ):
-                            st.session_state["selected_faculty_sheet_row"] = f_sheet_row
-                            st.rerun()
+            st.markdown("<div class='section-tag'>Departments</div>", unsafe_allow_html=True)
+            for d_start in range(0, len(sorted_dept_names), 3):
+                d_chunk = sorted_dept_names[d_start:d_start + 3]
+                d_cols = st.columns(3)
+                for offset, d_name in enumerate(d_chunk):
+                    d_count = sum(len(v) for v in dept_groups[d_name].values())
+                    if d_cols[offset].button(
+                        f"🏛️ {d_name} ({d_count})",
+                        key=f"dept_select_btn_{d_start}_{offset}",
+                        type="secondary",
+                        use_container_width=True,
+                    ):
+                        st.session_state["selected_dept_in_view"] = d_name
+                        st.session_state["selected_faculty_sheet_row"] = None
+                        st.rerun()
+
+        else:
+            dept_rows = [
+                r for r in faculty_rows
+                if (resolve_field_value(r, "Emp_Department") or "Other / Unassigned Department") == active_dept
+            ]
+            desig_map = {}
+            for r in dept_rows:
+                desig_name = resolve_field_value(r, "Emp_Designation") or "Other / Unspecified"
+                desig_map.setdefault(desig_name, []).append(r)
+
+            dept_total = len(dept_rows)
+            sorted_desigs = sorted(desig_map.keys(), key=get_designation_rank)
+            selected_fac_row = next((r for r in dept_rows if r.get("_sheet_row") == sel_row_idx), None)
+
+            st.markdown("<div class='dept-open-panel'>", unsafe_allow_html=True)
+            dh1, dh2 = st.columns([4.2, 1.3])
+            dh1.markdown(
+                f"<div class='section-tag'>Department View</div>"
+                f"<div style='font-size:21px;font-weight:700;color:#f8fafc;'>🏛️ {html.escape(active_dept)} "
+                f"<span style='font-size:13px;color:#5eead4;font-weight:600;'>({dept_total} Faculty)</span></div>",
+                unsafe_allow_html=True,
+            )
+            if dh2.button("⬅ Back to Departments", key="close_active_dept_btn", type="primary", use_container_width=True):
+                st.session_state["selected_dept_in_view"] = None
+                st.session_state["selected_faculty_sheet_row"] = None
+                st.rerun()
 
             if selected_fac_row is not None:
                 sel_name = resolve_field_value(selected_fac_row, "EMP_Name") or resolve_field_value(selected_fac_row, "Emp_Name") or "Unknown"
@@ -1683,10 +2394,10 @@ elif slice_choice == "FACULTY_CORNER":
                 _, sheet3_leave_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, leave_tab) if leave_tab else ([], [])
                 _, dnp_lookup_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, target_dnp_lookup_tab) if target_dnp_lookup_tab in all_tabs else ([], [])
                 _, sheet8_attendance_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, attendance_base_tab) if attendance_base_tab else ([], [])
-                _, roster_lookup_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, roster_tab) if roster_tab else ([], [])
+                roster_headers, roster_lookup_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, roster_tab) if roster_tab else ([], [])
 
                 st.markdown("<div class='profile-spotlight-box'>", unsafe_allow_html=True)
-                top_p1, top_p2 = st.columns([4.5, 1])
+                top_p1, top_p2 = st.columns([4.2, 1.3])
                 top_p1.markdown(
                     f"<div class='section-tag'>Faculty Details, Working Days & Present Summary</div>"
                     f"<div style='font-size:21px;font-weight:700;color:#f8fafc;'>{html.escape(sel_name)} "
@@ -1694,7 +2405,7 @@ elif slice_choice == "FACULTY_CORNER":
                     f"<div class='muted-sub' style='margin-top:2px;'>{html.escape(sel_desig or '-')}  •  {html.escape(sel_dept_name or '-')}</div>",
                     unsafe_allow_html=True,
                 )
-                if top_p2.button("✖ Close Details", key="close_faculty_spotlight_btn", use_container_width=True):
+                if top_p2.button("⬅ Back to Faculty List", key="close_faculty_spotlight_btn", use_container_width=True):
                     st.session_state["selected_faculty_sheet_row"] = None
                     st.rerun()
 
@@ -1711,18 +2422,19 @@ elif slice_choice == "FACULTY_CORNER":
                     render_html_table([{k: v for k, v in selected_fac_row.items() if k != "_sheet_row"}], max_rows=1)
 
                 att_summary = compute_faculty_working_and_present(
-                    sel_code, sel_name, sheet8_attendance_rows, sheet3_leave_rows, dnp_lookup_rows, roster_lookup_rows, date.today(), NATIONAL_HOLIDAYS_2026
+                    sel_code, sel_name, sheet8_attendance_rows, sheet3_leave_rows, dnp_lookup_rows,
+                    roster_lookup_rows, date.today(), NATIONAL_HOLIDAYS_2026, roster_headers=roster_headers
                 )
                 st.write("")
                 st.markdown(f"<div style='font-weight:700;color:#2dd4bf;font-size:14.5px;margin-bottom:8px;'>📊 Working Days & Total Days Present ({html.escape(target_base_tab)} + Day-by-Day till 31/12/2026)</div>", unsafe_allow_html=True)
                 render_html_table([att_summary], max_rows=1)
 
-                norm_sel_code = sel_code.strip().lower()
+                norm_sel_code = re.sub(r"\s+", "", sel_code).lower()
                 norm_sel_name = re.sub(r"\s+", " ", sel_name.strip()).lower()
 
                 matched_leaves_s3 = [
                     lr for lr in sheet3_leave_rows
-                    if (norm_sel_code and resolve_field_value(lr, "EMP_Code").lower() == norm_sel_code)
+                    if (norm_sel_code and re.sub(r"\s+", "", resolve_field_value(lr, "EMP_Code")).lower() == norm_sel_code)
                     or ((not norm_sel_code or not resolve_field_value(lr, "EMP_Code")) and norm_sel_name and re.sub(r"\s+", " ", (resolve_field_value(lr, "Emp_Name") or resolve_field_value(lr, "EMP_Name")).lower()) == norm_sel_name)
                 ]
                 matched_leaves_s3.sort(key=get_leave_recent_sort_key, reverse=True)
@@ -1735,7 +2447,7 @@ elif slice_choice == "FACULTY_CORNER":
 
                 matched_dnp_rows = [
                     dr for dr in dnp_lookup_rows
-                    if (norm_sel_code and resolve_field_value(dr, "EMP_Code").lower() == norm_sel_code)
+                    if (norm_sel_code and re.sub(r"\s+", "", resolve_field_value(dr, "EMP_Code")).lower() == norm_sel_code)
                     or ((not norm_sel_code or not resolve_field_value(dr, "EMP_Code")) and norm_sel_name and re.sub(r"\s+", " ", (resolve_field_value(dr, "EMP_Name") or resolve_field_value(dr, "Emp_Name")).lower()) == norm_sel_name)
                 ]
                 matched_dnp_rows.sort(key=get_dnp_recent_sort_key, reverse=True)
@@ -1747,6 +2459,29 @@ elif slice_choice == "FACULTY_CORNER":
                     st.info(f"No Do Not Punch records found for {sel_name}.")
 
                 st.markdown("</div>", unsafe_allow_html=True)
+
+            else:
+                for desig_name in sorted_desigs:
+                    fac_list = sorted(desig_map[desig_name], key=lambda x: (resolve_field_value(x, "EMP_Name") or resolve_field_value(x, "Emp_Name")).lower())
+                    st.markdown(f"<div class='desig-sub-label'>{html.escape(desig_name)} ({len(fac_list)})</div>", unsafe_allow_html=True)
+                    for start_i in range(0, len(fac_list), 4):
+                        chunk = fac_list[start_i:start_i + 4]
+                        btn_cols = st.columns(4)
+                        for col_offset, f_row in enumerate(chunk):
+                            f_sheet_row = f_row["_sheet_row"]
+                            f_name = resolve_field_value(f_row, "EMP_Name") or resolve_field_value(f_row, "Emp_Name") or "Unnamed"
+                            f_code = resolve_field_value(f_row, "EMP_Code")
+                            f_sl = resolve_field_value(f_row, "SL")
+                            meta_parts = [p for p in [f_code, f"SL:{f_sl}" if f_sl else ""] if p]
+                            meta_txt = f" ({', '.join(meta_parts)})" if meta_parts else ""
+                            if btn_cols[col_offset].button(
+                                f"👤 {f_name}{meta_txt}",
+                                key=f"fac_in_dept_btn_{f_sheet_row}",
+                                type="secondary",
+                                use_container_width=True,
+                            ):
+                                st.session_state["selected_faculty_sheet_row"] = f_sheet_row
+                                st.rerun()
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1934,21 +2669,28 @@ elif slice_choice == "FACULTY_CORNER":
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ================= SLICE 3: ROSTER (SHEET2) =================
+# ================= SLICE 3: ROSTER (NEAREST UPCOMING DATE DEFAULT) =================
 elif slice_choice == "Roster":
     st.query_params["slice"] = "Roster"
     target_roster_tab = roster_tab or "Sheet2"
-
-    render_banner(
-        "Roster",
-        f"Tab: <b>{html.escape(target_roster_tab)}</b>  |  Sorted by: <b>SL (Ascending)</b>  |  Auto-Refresh: <b>{AUTO_REFRESH_SECONDS}s</b>",
-    )
 
     try:
         roster_headers, roster_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, target_roster_tab)
     except Exception as e:
         st.error(f"Failed to load '{target_roster_tab}': {e}")
         st.stop()
+
+    distinct_roster_dates = sorted(
+        {get_roster_row_date_str(r) for r in roster_rows if get_roster_row_date_str(r)},
+        key=lambda s: (parse_sheet_date(s) or date.min, s),
+    )
+    nearest_upcoming_date_str = find_nearest_upcoming_roster_date(distinct_roster_dates, today_now)
+    active_date_label = nearest_upcoming_date_str or "All Dates"
+
+    render_banner(
+        "Roster",
+        f"Tab: <b>{html.escape(target_roster_tab)}</b>  |  Nearest Upcoming Date: <b>{html.escape(active_date_label)}</b>  |  Sorted by: <b>SL (Ascending)</b>",
+    )
 
     if not roster_rows:
         st.info(f"No records found in '{target_roster_tab}'.")
@@ -1960,18 +2702,26 @@ elif slice_choice == "Roster":
         if r_num in overrides:
             rr["_override_status"] = overrides[r_num]
 
-    rc1, rc2, rc3 = st.columns([2, 1.2, 0.8])
+    date_filter_options = (distinct_roster_dates + ["All"]) if distinct_roster_dates else ["All"]
+    default_date_idx = 0
+    if nearest_upcoming_date_str and nearest_upcoming_date_str in date_filter_options:
+        default_date_idx = date_filter_options.index(nearest_upcoming_date_str)
+
+    rc1, rc2, rc3, rc4 = st.columns([1.8, 1.1, 1.0, 0.75])
     r_search = rc1.text_input("Search Name / EMP_Code / SL", "", placeholder="Filter roster...", key="roster_filter_box").strip().lower()
     r_depts = sorted({resolve_field_value(r, "Emp_Department") for r in roster_rows if resolve_field_value(r, "Emp_Department")})
     r_dept = rc2.selectbox("Department", ["All"] + r_depts, key="roster_dept_filter")
-    page_size = rc3.selectbox("Rows / Page", [25, 50, 100, 250], index=1, key="roster_page_size")
+    r_date_filter = rc3.selectbox("Date", date_filter_options, index=default_date_idx, key="roster_date_filter")
+    page_size = rc4.selectbox("Rows / Page", [25, 50, 100, 250], index=1, key="roster_page_size")
 
     filtered_roster = []
     for rr in roster_rows:
         if r_dept != "All" and resolve_field_value(rr, "Emp_Department") != r_dept:
             continue
+        if r_date_filter != "All" and get_roster_row_date_str(rr) != r_date_filter:
+            continue
         if r_search:
-            hay = f"{resolve_field_value(rr, 'SL')} {resolve_field_value(rr, 'EMP_Code')} {resolve_field_value(rr, 'EMP_Name') or resolve_field_value(rr, 'Emp_Name')}".lower()
+            hay = f"{resolve_field_value(rr, 'SL')} {resolve_field_value(rr, 'EMP_Code')} {resolve_field_value(rr, 'EMP_Name') or resolve_field_value(rr, 'Emp_Name')} {get_roster_row_date_str(rr)}".lower()
             if r_search not in hay:
                 continue
         filtered_roster.append(rr)
@@ -1990,6 +2740,7 @@ elif slice_choice == "Roster":
         r_desig = resolve_field_value(rr, "Emp_Designation") or "-"
         r_dept_val = resolve_field_value(rr, "Emp_Department") or "-"
         r_sl = resolve_field_value(rr, "SL") or "-"
+        r_date_val = get_roster_row_date_str(rr) or "-"
         curr_status = get_roster_line_status(rr, roster_headers)
 
         if curr_status == "Found":
@@ -1999,14 +2750,15 @@ elif slice_choice == "Roster":
         else:
             st_badge = f"<span class='muted-sub'>{html.escape(curr_status or '-')}</span>"
 
-        c_sl, c_code, c_name, c_desig, c_dept_c, c_st, c_found, c_nf = st.columns(
-            [0.65, 1.0, 1.85, 1.45, 1.35, 0.95, 0.85, 1.05]
+        c_sl, c_code, c_name, c_desig, c_dept_c, c_date_c, c_st, c_found, c_nf = st.columns(
+            [0.60, 0.95, 1.70, 1.35, 1.25, 1.05, 0.90, 0.85, 1.05]
         )
         c_sl.markdown(f"<span style='font-weight:700;color:#5eead4;'>{html.escape(r_sl)}</span>", unsafe_allow_html=True)
         c_code.markdown(f"<span class='muted-sub'>{html.escape(r_code)}</span>", unsafe_allow_html=True)
         c_name.markdown(f"<div style='font-weight:600;color:#f8fafc;'>{html.escape(r_name)}</div>", unsafe_allow_html=True)
         c_desig.markdown(f"<span class='muted-sub'>{html.escape(r_desig)}</span>", unsafe_allow_html=True)
         c_dept_c.markdown(f"<span class='muted-sub'>{html.escape(r_dept_val)}</span>", unsafe_allow_html=True)
+        c_date_c.markdown(f"<span class='date-pill'>{html.escape(r_date_val)}</span>", unsafe_allow_html=True)
         c_st.markdown(st_badge, unsafe_allow_html=True)
 
         if c_found.button("Found", key=f"roster_found_{r_num}", use_container_width=True):
@@ -2020,9 +2772,9 @@ elif slice_choice == "Roster":
                     current_user,
                     action="Roster Found",
                     module="Roster",
-                    details=f"SL {r_sl} — {r_name} ({r_code}) marked 'Found' in '{col_name}'.",
+                    details=f"SL {r_sl} — {r_name} ({r_code}) [Date: {r_date_val}] marked 'Found' in '{col_name}'.",
                 )
-                st.toast(f"{r_name}: Found", icon="✅")
+                st.toast(f"{r_name} ({r_date_val}): Found", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Save failed: {e}")
@@ -2038,9 +2790,9 @@ elif slice_choice == "Roster":
                     current_user,
                     action="Roster Not Found",
                     module="Roster",
-                    details=f"SL {r_sl} — {r_name} ({r_code}) marked 'Not Found' in '{col_name}'.",
+                    details=f"SL {r_sl} — {r_name} ({r_code}) [Date: {r_date_val}] marked 'Not Found' in '{col_name}'.",
                 )
-                st.toast(f"{r_name}: Not Found", icon="❌")
+                st.toast(f"{r_name} ({r_date_val}): Not Found", icon="❌")
                 st.rerun()
             except Exception as e:
                 st.error(f"Save failed: {e}")
@@ -2051,10 +2803,7 @@ elif slice_choice == "Roster":
 
 # ================= SLICE 4: LEAVE MANAGEMENT =================
 elif slice_choice == "Leave":
-    render_banner(
-        "Leave Management",
-        f"Spreadsheet: <b>{html.escape(SPREADSHEET_NAME)}</b>  |  Source Tab: <b>{html.escape(str(faculty_tab))}</b>  |  Leave Tab: <b>{html.escape(str(leave_tab))}</b>",
-    )
+    render_banner("Leave Management")
     if not leave_tab:
         st.warning("No leave worksheet tab found.")
         st.stop()
@@ -2071,7 +2820,10 @@ elif slice_choice == "Leave":
     if not is_admin_user:
         st.session_state["confirm_delete_leave_row"] = None
 
-    today_val = date.today()
+    today_val = today_now
+    tomorrow_val = today_val + timedelta(days=1)
+    today_full_str = today_val.strftime("%Y-%m-%d")
+
     tab_upcoming, tab_suggest, tab_all_records, tab_add_leave = st.tabs([
         "📅 Upcoming Leave",
         "💡 Leave Suggest",
@@ -2080,12 +2832,19 @@ elif slice_choice == "Leave":
     ])
 
     with tab_upcoming:
-        st.subheader(f"Upcoming Leave (Upto ≥ {today_val.strftime('%Y-%m-%d')})")
-        uc1, uc2, uc3 = st.columns([2, 1, 1])
+        st.subheader("Upcoming Leave")
+        uc1, uc2, uc3 = st.columns([2, 1, 1.2])
         leave_search = uc1.text_input("Search by EMP_Code, Name, or SL", "", placeholder="Search faculty...", key="leave_upcoming_search").strip().lower()
         leave_depts = sorted({str(r.get("Emp_Department", "")).strip() for r in leave_rows if str(r.get("Emp_Department", "")).strip()})
         sel_leave_dept = uc2.selectbox("Department", ["All"] + leave_depts, key="leave_upcoming_dept")
-        uc3.metric("Today's Date", today_val.strftime("%Y-%m-%d"))
+        uc3.markdown(
+            f"<div class='today-highlight-card'>"
+            f"<div><div class='today-highlight-label'>Today's Date</div>"
+            f"<div class='today-highlight-date'>{html.escape(today_full_str)}</div></div>"
+            f"<span style='font-size:20px;'>📆</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         upcoming_rows = []
         for r in leave_rows:
@@ -2102,7 +2861,125 @@ elif slice_choice == "Leave":
 
         upcoming_rows.sort(key=lambda row: parse_sheet_date(row.get("Upto", "")) or date.max)
         st.metric("Total Upcoming Leave Records", len(upcoming_rows))
-        render_html_table(upcoming_rows, max_rows=300)
+
+        up_edit_row_num = st.session_state.get("editing_leave_sheet_row")
+        up_row_to_edit = next((r for r in upcoming_rows if r.get("_sheet_row") == up_edit_row_num), None)
+        if up_row_to_edit is not None:
+            up_edit_name = str(up_row_to_edit.get("Emp_Name", up_row_to_edit.get("EMP_Name", ""))).strip()
+            up_edit_code = str(up_row_to_edit.get("EMP_Code", "")).strip()
+            st.markdown(
+                f"<div class='form-panel'><div class='section-tag'>Edit Upcoming Leave</div>"
+                f"<div style='font-size:18px;font-weight:700;color:#f8fafc;'>{html.escape(up_edit_name)} ({html.escape(up_edit_code)})</div>",
+                unsafe_allow_html=True,
+            )
+            p_from = parse_sheet_date(up_row_to_edit.get("From", "")) or today_val
+            p_upto = parse_sheet_date(up_row_to_edit.get("Upto", "")) or p_from
+            ud1, ud2 = st.columns(2)
+            new_u_from = ud1.date_input("From", value=p_from, key=f"up_ed_from_{up_edit_row_num}")
+            new_u_upto = ud2.date_input("Upto", value=p_upto, key=f"up_ed_upto_{up_edit_row_num}")
+
+            c_ltype = str(up_row_to_edit.get("Leave_types", "")).strip()
+            c_astatus = str(up_row_to_edit.get("Applying_Stutas.", up_row_to_edit.get("Applying_Status", ""))).strip()
+            c_action = str(up_row_to_edit.get("Take_Action_By", "")).strip()
+            lt_opts = list(dict.fromkeys(LEAVE_TYPE_OPTIONS + ([c_ltype] if c_ltype else [])))
+            as_opts = list(dict.fromkeys(APPLYING_STATUS_OPTIONS + ([c_astatus] if c_astatus else [])))
+            ac_opts = list(dict.fromkeys(TAKE_ACTION_BY_OPTIONS + ([c_action] if c_action else [])))
+
+            ue1, ue2, ue3 = st.columns(3)
+            new_u_ltype = ue1.selectbox("Leave_types", lt_opts, index=find_option_index(lt_opts, c_ltype), key=f"up_ed_type_{up_edit_row_num}")
+            new_u_astatus = ue2.selectbox("Applying_Stutas.", as_opts, index=find_option_index(as_opts, c_astatus), key=f"up_ed_status_{up_edit_row_num}")
+            new_u_action = ue3.selectbox("Take_Action_By", ac_opts, index=find_option_index(ac_opts, c_action), key=f"up_ed_action_{up_edit_row_num}")
+
+            frozen_u_cols = {"", "EMP_Code", "Emp_Name", "EMP_Name", "Emp_Designation", "Emp_Department", "SL"}
+            ub1, ub2 = st.columns([1.2, 4])
+            if ub1.button("Update Leave", type="primary", key=f"up_ed_save_{up_edit_row_num}", use_container_width=True):
+                if new_u_upto < new_u_from:
+                    st.error("Upto date cannot be earlier than From date.")
+                else:
+                    upd_payload = {}
+                    for h in leave_headers:
+                        hc = h.strip()
+                        if not hc:
+                            continue
+                        if hc in frozen_u_cols:
+                            upd_payload[h] = str(up_row_to_edit.get(h, ""))
+                        elif hc == "From":
+                            upd_payload[h] = new_u_from.strftime("%Y-%m-%d")
+                        elif hc == "Upto":
+                            upd_payload[h] = new_u_upto.strftime("%Y-%m-%d")
+                        elif hc == "Leave_types":
+                            upd_payload[h] = str(new_u_ltype or "").strip()
+                        elif hc in {"Applying_Stutas.", "Applying_Status"}:
+                            upd_payload[h] = str(new_u_astatus or "").strip()
+                        elif hc == "Take_Action_By":
+                            upd_payload[h] = str(new_u_action or "").strip()
+                        else:
+                            upd_payload[h] = str(up_row_to_edit.get(h, ""))
+                    update_sheet_row(SPREADSHEET_NAME, leave_tab, leave_headers, up_edit_row_num, upd_payload)
+                    write_activity_log(SPREADSHEET_NAME, current_user, "Edit Leave", "Leave", f"Updated upcoming leave row {up_edit_row_num} for {up_edit_name}")
+                    st.session_state["editing_leave_sheet_row"] = None
+                    st.success("Upcoming leave updated!")
+                    st.rerun()
+            if ub2.button("Cancel Edit", key=f"up_ed_cancel_{up_edit_row_num}"):
+                st.session_state["editing_leave_sheet_row"] = None
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if upcoming_rows:
+            ok_map = st.session_state["upcoming_leave_ok_map"]
+            st.markdown("<div class='form-panel'><div class='section-tag'>Upcoming Leave List</div>", unsafe_allow_html=True)
+            for rec in upcoming_rows:
+                r_num = rec["_sheet_row"]
+                r_code = str(rec.get("EMP_Code", "")).strip() or "-"
+                r_name = str(rec.get("Emp_Name", rec.get("EMP_Name", ""))).strip() or "-"
+                r_desig = str(rec.get("Emp_Designation", "")).strip() or "-"
+                r_dept = str(rec.get("Emp_Department", "")).strip() or "-"
+                r_from_str = str(rec.get("From", "")).strip() or "-"
+                r_upto_str = str(rec.get("Upto", "")).strip() or "-"
+                r_ltype = str(rec.get("Leave_types", "")).strip() or "-"
+
+                from_dt = parse_sheet_date(r.get("From", ""))
+                upto_dt = parse_sheet_date(r.get("Upto", ""))
+
+                is_tomorrow_leave = is_date_in_range(tomorrow_val, from_dt, upto_dt)
+                ok_key = f"{r_num}_{tomorrow_val.isoformat()}"
+                is_marked_ok = bool(ok_map.get(ok_key, False))
+                row_cls = "upcoming-row-green" if is_marked_ok else "upcoming-row-red"
+
+                st.markdown(f"<div class='{row_cls}'>", unsafe_allow_html=True)
+                cols_up = st.columns([0.95, 1.85, 1.30, 1.25, 1.55, 0.80, 0.80, 0.90])
+                cols_up[0].markdown(f"<div style='font-size:12.5px;font-weight:600;'>{html.escape(r_code)}</div>", unsafe_allow_html=True)
+                cols_up[1].markdown(f"<div style='font-size:13.5px;font-weight:700;'>{html.escape(r_name)}</div>", unsafe_allow_html=True)
+                cols_up[2].markdown(f"<div style='font-size:12.5px;'>{html.escape(r_desig)}</div>", unsafe_allow_html=True)
+                cols_up[3].markdown(f"<div style='font-size:12.5px;'>{html.escape(r_dept)}</div>", unsafe_allow_html=True)
+                cols_up[4].markdown(f"<div style='font-size:12.5px;font-weight:600;'>{html.escape(r_from_str)} → {html.escape(r_upto_str)}</div>", unsafe_allow_html=True)
+                cols_up[5].markdown(f"<div style='font-size:12.5px;font-weight:700;'>{html.escape(r_ltype)}</div>", unsafe_allow_html=True)
+
+                if cols_up[6].button("Edit", key=f"btn_edit_up_lv_{r_num}", use_container_width=True):
+                    st.session_state["editing_leave_sheet_row"] = r_num
+                    st.rerun()
+
+                ok_label = "✅ OK" if is_marked_ok else "OK"
+                if cols_up[7].button(
+                    ok_label,
+                    key=f"btn_ok_up_lv_{r_num}",
+                    disabled=not is_tomorrow_leave,
+                    use_container_width=True,
+                ):
+                    new_ok_state = not is_marked_ok
+                    st.session_state["upcoming_leave_ok_map"][ok_key] = new_ok_state
+                    write_activity_log(
+                        SPREADSHEET_NAME,
+                        current_user,
+                        action="Upcoming Leave Action OK" if new_ok_state else "Upcoming Leave Action Undo",
+                        module="Leave",
+                        details=f"Row {r_num} — {r_name} ({r_code}) for tomorrow ({tomorrow_val.isoformat()}) set to {'OK (Green)' if new_ok_state else 'Pending (Red)'}.",
+                    )
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.info("No upcoming leave records found.")
 
     with tab_suggest:
         st.subheader("Leave Suggest (Longest Days Since Latest Upto)")
@@ -2217,7 +3094,7 @@ elif slice_choice == "Leave":
 
         editing_row_num = st.session_state.get("editing_leave_sheet_row")
         row_to_edit = next((r for r in leave_rows if r.get("_sheet_row") == editing_row_num), None)
-        if row_to_edit is not None:
+        if row_to_edit is not None and not any(r.get("_sheet_row") == editing_row_num for r in upcoming_rows):
             edit_name = str(row_to_edit.get("Emp_Name", row_to_edit.get("EMP_Name", ""))).strip()
             edit_code = str(row_to_edit.get("EMP_Code", "")).strip()
             st.markdown(f"<div class='form-panel'><div class='section-tag'>Edit Leave Record</div><div style='font-size:18px;font-weight:700;color:#f8fafc;'>{html.escape(edit_name)} ({html.escape(edit_code)})</div>", unsafe_allow_html=True)
@@ -2242,22 +3119,25 @@ elif slice_choice == "Leave":
             frozen_leave_cols = {"", "EMP_Code", "Emp_Name", "EMP_Name", "Emp_Designation", "Emp_Department", "SL"}
             eb1, eb2 = st.columns([1.2, 4])
             if eb1.button("Update Leave", type="primary", key=f"ed_lv_save_{editing_row_num}", use_container_width=True):
-                updated_rec = {}
-                for h in leave_headers:
-                    hc = h.strip()
-                    if not hc: continue
-                    if hc in frozen_leave_cols: updated_rec[h] = str(row_to_edit.get(h, ""))
-                    elif hc == "From": updated_rec[h] = ed_from_val.strftime("%Y-%m-%d")
-                    elif hc == "Upto": updated_rec[h] = ed_upto_val.strftime("%Y-%m-%d")
-                    elif hc == "Leave_types": updated_rec[h] = str(ed_ltype_val or "").strip()
-                    elif hc in {"Applying_Stutas.", "Applying_Status"}: updated_rec[h] = str(ed_astatus_val or "").strip()
-                    elif hc == "Take_Action_By": updated_rec[h] = str(ed_action_val or "").strip()
-                    else: updated_rec[h] = str(row_to_edit.get(h, ""))
-                update_sheet_row(SPREADSHEET_NAME, leave_tab, leave_headers, editing_row_num, updated_rec)
-                write_activity_log(SPREADSHEET_NAME, current_user, "Edit Leave", "Leave", f"Updated row {editing_row_num} for {edit_name}")
-                st.session_state["editing_leave_sheet_row"] = None
-                st.success("Leave updated!")
-                st.rerun()
+                if ed_upto_val < ed_from_val:
+                    st.error("Upto date cannot be earlier than From date.")
+                else:
+                    updated_rec = {}
+                    for h in leave_headers:
+                        hc = h.strip()
+                        if not hc: continue
+                        if hc in frozen_leave_cols: updated_rec[h] = str(row_to_edit.get(h, ""))
+                        elif hc == "From": updated_rec[h] = ed_from_val.strftime("%Y-%m-%d")
+                        elif hc == "Upto": updated_rec[h] = ed_upto_val.strftime("%Y-%m-%d")
+                        elif hc == "Leave_types": updated_rec[h] = str(ed_ltype_val or "").strip()
+                        elif hc in {"Applying_Stutas.", "Applying_Status"}: updated_rec[h] = str(ed_astatus_val or "").strip()
+                        elif hc == "Take_Action_By": updated_rec[h] = str(ed_action_val or "").strip()
+                        else: updated_rec[h] = str(row_to_edit.get(h, ""))
+                    update_sheet_row(SPREADSHEET_NAME, leave_tab, leave_headers, editing_row_num, updated_rec)
+                    write_activity_log(SPREADSHEET_NAME, current_user, "Edit Leave", "Leave", f"Updated row {editing_row_num} for {edit_name}")
+                    st.session_state["editing_leave_sheet_row"] = None
+                    st.success("Leave updated!")
+                    st.rerun()
             if eb2.button("Cancel Edit", key=f"ed_lv_cancel_{editing_row_num}"):
                 st.session_state["editing_leave_sheet_row"] = None
                 st.rerun()
@@ -2341,25 +3221,28 @@ elif slice_choice == "Leave":
                 new_lv_status = add_e2.selectbox("Applying_Stutas.", APPLYING_STATUS_OPTIONS, index=None, key="add_lv_status_sel")
                 new_lv_action = add_e3.selectbox("Take_Action_By", TAKE_ACTION_BY_OPTIONS, index=None, key="add_lv_action_sel")
                 if st.form_submit_button("Save Leave", type="primary"):
-                    payload = {h: "" for h in leave_headers if h.strip()}
-                    for h in leave_headers:
-                        hc = h.strip()
-                        if not hc: continue
-                        nh = re.sub(r"[^a-z0-9]", "", hc.lower())
-                        if nh == "empcode": payload[h] = f_emp_code
-                        elif nh == "empname": payload[h] = f_emp_name
-                        elif nh == "empdesignation": payload[h] = f_desig
-                        elif nh == "empdepartment": payload[h] = f_dept
-                        elif nh == "sl": payload[h] = f_sl
-                        elif nh == "from": payload[h] = new_lv_from.strftime("%Y-%m-%d")
-                        elif nh == "upto": payload[h] = new_lv_upto.strftime("%Y-%m-%d")
-                        elif nh == "leavetypes": payload[h] = str(new_lv_type or "").strip()
-                        elif nh in {"applyingstutas", "applyingstatus"}: payload[h] = str(new_lv_status or "").strip()
-                        elif nh == "takeactionby": payload[h] = str(new_lv_action or "").strip()
-                    append_sheet_row(SPREADSHEET_NAME, leave_tab, leave_headers, payload)
-                    write_activity_log(SPREADSHEET_NAME, current_user, "Add Leave", "Leave", f"Added leave for {f_emp_name} ({f_emp_code})")
-                    st.success(f"Leave saved to '{leave_tab}'!")
-                    st.rerun()
+                    if new_lv_upto < new_lv_from:
+                        st.error("Upto date cannot be earlier than From date.")
+                    else:
+                        payload = {h: "" for h in leave_headers if h.strip()}
+                        for h in leave_headers:
+                            hc = h.strip()
+                            if not hc: continue
+                            nh = re.sub(r"[^a-z0-9]", "", hc.lower())
+                            if nh == "empcode": payload[h] = f_emp_code
+                            elif nh == "empname": payload[h] = f_emp_name
+                            elif nh == "empdesignation": payload[h] = f_desig
+                            elif nh == "empdepartment": payload[h] = f_dept
+                            elif nh == "sl": payload[h] = f_sl
+                            elif nh == "from": payload[h] = new_lv_from.strftime("%Y-%m-%d")
+                            elif nh == "upto": payload[h] = new_lv_upto.strftime("%Y-%m-%d")
+                            elif nh == "leavetypes": payload[h] = str(new_lv_type or "").strip()
+                            elif nh in {"applyingstutas", "applyingstatus"}: payload[h] = str(new_lv_status or "").strip()
+                            elif nh == "takeactionby": payload[h] = str(new_lv_action or "").strip()
+                        append_sheet_row(SPREADSHEET_NAME, leave_tab, leave_headers, payload)
+                        write_activity_log(SPREADSHEET_NAME, current_user, "Add Leave", "Leave", f"Added leave for {f_emp_name} ({f_emp_code})")
+                        st.success(f"Leave saved to '{leave_tab}'!")
+                        st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -2380,7 +3263,7 @@ elif slice_choice == "Do Not Punch":
     if not is_admin_user:
         st.session_state["confirm_delete_dnp_row"] = None
 
-    today_val = date.today()
+    today_val = today_now
     tab_dnp_add, tab_dnp_records = st.tabs(["➕ Add", "📄 Do Not Punch Record"])
 
     with tab_dnp_add:
@@ -2419,22 +3302,25 @@ elif slice_choice == "Do Not Punch":
             dnp_issue_by = nf2.text_input("Notification issue By", value=current_user.get("name", ""), key="dnp_issue_by_input").strip()
 
             if st.button("Save Do Not Punch", type="primary", key="dnp_save_btn"):
-                field_map = {
-                    "empcode": fac_emp_code, "empname": fac_emp_name, "empdesignation": fac_desig,
-                    "empdepartment": fac_dept, "sl": fac_sl, "status": fac_status, "category": fac_category,
-                    "donotpunchfrom": dnp_from_date.strftime("%Y-%m-%d"),
-                    "donotpunchupto": dnp_upto_date.strftime("%Y-%m-%d"),
-                    "notificationdate": dnp_notif_date.strftime("%Y-%m-%d"),
-                    "notificationissueby": dnp_issue_by,
-                }
-                new_dnp_row = {
-                    h: field_map.get(re.sub(r"[^a-z0-9]", "", h.strip().lower()), "")
-                    for h in dnp_headers if h.strip()
-                }
-                append_sheet_row(SPREADSHEET_NAME, target_dnp_tab, dnp_headers, new_dnp_row)
-                write_activity_log(SPREADSHEET_NAME, current_user, "Add Do Not Punch", "Do Not Punch", f"Added DNP for {fac_emp_name} ({fac_emp_code})")
-                st.success(f"Saved to '{target_dnp_tab}'!")
-                st.rerun()
+                if dnp_upto_date < dnp_from_date:
+                    st.error("Do Not Punch Upto date cannot be earlier than From date.")
+                else:
+                    field_map = {
+                        "empcode": fac_emp_code, "empname": fac_emp_name, "empdesignation": fac_desig,
+                        "empdepartment": fac_dept, "sl": fac_sl, "status": fac_status, "category": fac_category,
+                        "donotpunchfrom": dnp_from_date.strftime("%Y-%m-%d"),
+                        "donotpunchupto": dnp_upto_date.strftime("%Y-%m-%d"),
+                        "notificationdate": dnp_notif_date.strftime("%Y-%m-%d"),
+                        "notificationissueby": dnp_issue_by,
+                    }
+                    new_dnp_row = {
+                        h: field_map.get(re.sub(r"[^a-z0-9]", "", h.strip().lower()), "")
+                        for h in dnp_headers if h.strip()
+                    }
+                    append_sheet_row(SPREADSHEET_NAME, target_dnp_tab, dnp_headers, new_dnp_row)
+                    write_activity_log(SPREADSHEET_NAME, current_user, "Add Do Not Punch", "Do Not Punch", f"Added DNP for {fac_emp_name} ({fac_emp_code})")
+                    st.success(f"Saved to '{target_dnp_tab}'!")
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_dnp_records:
@@ -2461,18 +3347,7 @@ elif slice_choice == "Do Not Punch":
         render_html_table(sorted_dnp, max_rows=300)
 
 
-# ================= SLICE 6: OTHER SHEET TABS =================
-elif slice_choice == "Other Sheet Tabs":
-    render_banner("Other Sheet Tabs", f"Spreadsheet: <b>{html.escape(SPREADSHEET_NAME)}</b>")
-    known = {t for t in [faculty_tab, leave_tab, dnp_tab, attendance_base_tab, roster_tab, USERS_TAB_NAME, LOGS_TAB_NAME, REQUESTS_TAB_NAME] if t}
-    other_tabs = [t for t in all_tabs if t not in known] or [t for t in all_tabs if t not in {USERS_TAB_NAME, LOGS_TAB_NAME, REQUESTS_TAB_NAME}]
-    if other_tabs:
-        selected_tab = st.selectbox("Select Tab", other_tabs)
-        _, tab_rows = load_worksheet_rows_with_index(SPREADSHEET_NAME, selected_tab)
-        render_html_table(tab_rows, max_rows=150)
-
-
-# ================= SLICE 7: USERS, SECURITY, LOGS & ADMIN NOTICES =================
+# ================= SLICE 6: USERS, SECURITY, LOGS & ADMIN NOTICES =================
 elif slice_choice == "Users":
     render_banner(
         "Security & Password" if not is_admin_user else "Users, Activity Logs & Admin Notices",
@@ -2506,7 +3381,13 @@ elif slice_choice == "Users":
                 new_role = u3.selectbox("Role", ["user", "admin"])
                 new_pass = st.text_input("Initial Password", type="password", placeholder="Set password")
                 if st.form_submit_button("Create User", type="primary"):
-                    if new_uname and new_pass and new_uname not in sheet_users_db:
+                    if not new_uname or not re.fullmatch(r"[a-z0-9_.-]{3,40}", new_uname):
+                        st.error("Username must be 3–40 characters: letters, numbers, dot, underscore or hyphen.")
+                    elif len(new_pass) < 8:
+                        st.error("Initial password must be at least 8 characters long.")
+                    elif new_uname in sheet_users_db:
+                        st.error("This username already exists.")
+                    else:
                         add_user_to_sheet(SPREADSHEET_NAME, new_uname, new_fullname, new_role, new_pass)
                         write_activity_log(SPREADSHEET_NAME, current_user, "Create User", "Users & Security", f"Created user '{new_uname}'")
                         st.success(f"User '{new_uname}' created!")
@@ -2520,14 +3401,14 @@ elif slice_choice == "Users":
             if st.form_submit_button("Update Password", type="primary"):
                 uname = current_user["username"]
                 rec = sheet_users_db.get(uname)
-                if rec and verify_password(curr_pw, rec["password_hash"]) and next_pw:
-                    if update_user_password_in_sheet(SPREADSHEET_NAME, uname, next_pw):
-                        st.query_params["auth_t"] = build_auth_token(uname, hash_password(next_pw))
-                        write_activity_log(SPREADSHEET_NAME, current_user, "Change Password", "Users & Security", f"Updated password for '{uname}'")
-                        st.success("Password updated!")
-                        st.rerun()
-                else:
-                    st.error("Current password is incorrect or new password is empty.")
+                if not rec or not verify_password(curr_pw, rec["password_hash"]):
+                    st.error("Current password is incorrect.")
+                elif len(next_pw) < 8:
+                    st.error("New password must be at least 8 characters long.")
+                elif update_user_password_in_sheet(SPREADSHEET_NAME, uname, next_pw):
+                    write_activity_log(SPREADSHEET_NAME, current_user, "Change Password", "Users & Security", f"Updated password for '{uname}'")
+                    st.success("Password updated!")
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     if is_admin_user and tab_admin_notices is not None:
