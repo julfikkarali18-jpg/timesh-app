@@ -2237,7 +2237,72 @@ if st.session_state["yellow_nav_expanded"]:
             st.query_params["slice"] = nav_yn["key"]
             st.session_state["yellow_nav_expanded"] = False
             st.rerun()
+if "yellow_nav_expanded" not in st.session_state:
+    st.session_state["yellow_nav_expanded"] = False
 
+if st.query_params.get("yn_toggle") == "1":
+    st.session_state["yellow_nav_expanded"] = not st.session_state["yellow_nav_expanded"]
+    st.query_params.pop("yn_toggle", None)
+    st.rerun()
+
+curr_auth_q = str(st.session_state.get("persistent_auth_token") or st.query_params.get("auth") or "").strip()
+curr_slice_q = str(st.session_state.get("active_nav_slice") or "Analytics Dashboard").strip()
+toggle_params = {"slice": curr_slice_q, "yn_toggle": "1"}
+if curr_auth_q:
+    toggle_params["auth"] = curr_auth_q
+toggle_href = html.escape("?" + urllib.parse.urlencode(toggle_params))
+
+st.markdown(
+    f"""
+    <div style="margin: 6px 0 10px 0;">
+        <a href="{toggle_href}" target="_self" style="
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background-color: #facc15 !important;
+            color: #090d16 !important;
+            font-weight: 900 !important;
+            font-size: 14px !important;
+            padding: 9px 16px !important;
+            border-radius: 10px !important;
+            border: 2px solid #fef08a !important;
+            text-decoration: none !important;
+            box-shadow: 0 0 14px rgba(250, 204, 21, 0.8) !important;
+            letter-spacing: 0.4px;
+        ">☰ NAVIGATION</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if st.session_state["yellow_nav_expanded"]:
+    st.markdown(
+        "<div style='background:#0f172a;border:2px solid #facc15;border-radius:12px;"
+        "padding:10px 12px;margin:4px 0 12px 0;'>"
+        "<div style='color:#facc15;font-size:12px;font-weight:800;margin-bottom:4px;'>"
+        "📌 GO TO PAGE</div></div>",
+        unsafe_allow_html=True,
+    )
+    yn_cols = st.columns(3)
+    for idx_yn, nav_yn in enumerate(NAV_ITEMS):
+        lbl_yn = nav_yn["title"]
+        if nav_yn["key"] == "Leave":
+            lbl_yn = f"Leave ({upcoming_leave_count})"
+        elif nav_yn["key"] == "Do Not Punch":
+            lbl_yn = f"DNP ({active_dnp_count})"
+        elif nav_yn["key"] == "Users" and not is_admin_user:
+            lbl_yn = "Security"
+
+        if yn_cols[idx_yn % 3].button(
+            f"{nav_yn['icon']} {lbl_yn}",
+            key=f"yn_page_btn_{nav_yn['key']}",
+            type="primary" if st.session_state["active_nav_slice"] == nav_yn["key"] else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state["active_nav_slice"] = nav_yn["key"]
+            st.query_params["slice"] = nav_yn["key"]
+            st.session_state["yellow_nav_expanded"] = False
+            st.rerun()
 slice_choice = st.session_state["active_nav_slice"]
 
 
