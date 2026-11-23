@@ -143,9 +143,9 @@ html, body, [class*="css"] {
 }
 
 .stApp {
-    background: radial-gradient(circle at top right, rgba(20, 184, 166, 0.11), transparent 36%),
-                radial-gradient(circle at top left, rgba(56, 189, 248, 0.10), transparent 32%),
-                #0b1120;
+    background: radial-gradient(circle at top right, rgba(59, 130, 246, 0.28), transparent 40%),
+                radial-gradient(circle at top left, rgba(14, 165, 233, 0.22), transparent 36%),
+                linear-gradient(180deg, #0a192f 0%, #071326 100%) !important;
     color: #f8fafc;
 }
 
