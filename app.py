@@ -2174,6 +2174,69 @@ if visible_alerts:
             st.rerun()
 
 inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
+inject_auto_refresh(AUTO_REFRESH_SECONDS, enabled=st.session_state["auto_refresh_enabled"])
+
+# --- এখানে হলুদ NAVIGATION বাটনের কোডটি বসাবেন ---
+if "yellow_nav_expanded" not in st.session_state:
+    st.session_state["yellow_nav_expanded"] = False
+
+st.markdown(
+    """
+    <style>
+    div.st-key-yellow_nav_toggle_btn button,
+    div.st-key-yellow_nav_toggle_btn button * {
+        background-color: #facc15 !important;
+        background: #facc15 !important;
+        color: #090d16 !important;
+        border: 2px solid #fef08a !important;
+        font-weight: 900 !important;
+        font-size: 14px !important;
+        border-radius: 10px !important;
+        box-shadow: 0 0 14px rgba(250, 204, 21, 0.75) !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+y_col1, _ = st.columns([1.6, 4.4])
+with y_col1:
+    if st.button(
+        "☰ NAVIGATION",
+        key="yellow_nav_toggle_btn",
+        use_container_width=True,
+    ):
+        st.session_state["yellow_nav_expanded"] = not st.session_state["yellow_nav_expanded"]
+        st.rerun()
+
+if st.session_state["yellow_nav_expanded"]:
+    st.markdown(
+        "<div style='background:#0f172a;border:2px solid #facc15;border-radius:12px;"
+        "padding:10px 12px;margin:6px 0 12px 0;'>"
+        "<div style='color:#facc15;font-size:12px;font-weight:800;margin-bottom:8px;'>"
+        "📌 GO TO PAGE</div></div>",
+        unsafe_allow_html=True,
+    )
+    yn_cols = st.columns(3)
+    for idx_yn, nav_yn in enumerate(NAV_ITEMS):
+        lbl_yn = nav_yn["title"]
+        if nav_yn["key"] == "Leave":
+            lbl_yn = f"Leave ({upcoming_leave_count})"
+        elif nav_yn["key"] == "Do Not Punch":
+            lbl_yn = f"DNP ({active_dnp_count})"
+        elif nav_yn["key"] == "Users" and not is_admin_user:
+            lbl_yn = "Security"
+
+        if yn_cols[idx_yn % 3].button(
+            f"{nav_yn['icon']} {lbl_yn}",
+            key=f"yn_page_btn_{nav_yn['key']}",
+            type="primary" if st.session_state["active_nav_slice"] == nav_yn["key"] else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state["active_nav_slice"] = nav_yn["key"]
+            st.query_params["slice"] = nav_yn["key"]
+            st.session_state["yellow_nav_expanded"] = False
+            st.rerun()
 
 slice_choice = st.session_state["active_nav_slice"]
 
