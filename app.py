@@ -160,21 +160,22 @@ header[data-testid="stHeader"] {
 [data-testid="collapsedControl"] button,
 button[data-testid="stSidebarCollapseButton"],
 button[kind="headerNoPadding"] {
-    background: linear-gradient(135deg, #14b8a6, #0ea5e9) !important;
-    color: #ffffff !important;
-    border: 1px solid rgba(255, 255, 255, 0.55) !important;
+    background: #facc15 !important;
+    color: #090d16 !important;
+    border: 2px solid #fef08a !important;
     border-radius: 10px !important;
-    box-shadow: 0 4px 14px rgba(20, 184, 166, 0.45) !important;
+    box-shadow: 0 0 14px rgba(250, 204, 21, 0.85) !important;
     opacity: 1 !important;
+    font-weight: 900 !important;
 }
 
 [data-testid="collapsedControl"] svg,
 [data-testid="collapsedControl"] span,
 button[data-testid="stSidebarCollapseButton"] svg,
 button[data-testid="stSidebarCollapseButton"] span {
-    color: #ffffff !important;
-    stroke: #ffffff !important;
-    fill: #ffffff !important;
+    color: #090d16 !important;
+    stroke: #090d16 !important;
+    fill: #090d16 !important;
 }
 
 div[data-testid="stAppViewBlockContainer"],
