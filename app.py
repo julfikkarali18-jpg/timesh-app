@@ -2143,50 +2143,6 @@ with st.sidebar:
         st.rerun()
 
 # High-contrast Mobile Quick Navigation Strip (visible on phones)
-curr_slice_now = st.session_state["active_nav_slice"]
-st.markdown(
-    f"<div class='mobile-quick-header'>"
-    f"<div class='mobile-quick-brand'>"
-    f"<div class='mobile-quick-logo'>🎓</div>"
-    f"<div class='mobile-quick-title'>TIMESH</div>"
-    f"</div>"
-    f"<span class='mobile-quick-badge'>{html.escape(str(current_user.get('role', 'USER')).upper())}</span>"
-    f"</div>",
-    unsafe_allow_html=True,
-)
-mob_r1 = st.columns(3)
-for idx_m, nav_m in enumerate(NAV_ITEMS[:3]):
-    lbl_m = f"Leave ({upcoming_leave_count})" if nav_m["key"] == "Leave" else nav_m["title"]
-    if mob_r1[idx_m].button(
-        f"{nav_m['icon']} {lbl_m}",
-        key=f"mob_nav_{nav_m['key']}",
-        type="primary" if curr_slice_now == nav_m["key"] else "secondary",
-        use_container_width=True,
-    ):
-        st.session_state["active_nav_slice"] = nav_m["key"]
-        st.query_params["slice"] = nav_m["key"]
-        st.rerun()
-
-mob_r2 = st.columns(3)
-for idx_m2, nav_m2 in enumerate(NAV_ITEMS[3:]):
-    if nav_m2["key"] == "Leave":
-        lbl_m2 = f"Leave ({upcoming_leave_count})"
-    elif nav_m2["key"] == "Do Not Punch":
-        lbl_m2 = f"DNP ({active_dnp_count})"
-    elif nav_m2["key"] == "Users" and not is_admin_user:
-        lbl_m2 = "Security"
-    else:
-        lbl_m2 = nav_m2["title"]
-    if mob_r2[idx_m2].button(
-        f"{nav_m2['icon']} {lbl_m2}",
-        key=f"mob_nav_{nav_m2['key']}",
-        type="primary" if curr_slice_now == nav_m2["key"] else "secondary",
-        use_container_width=True,
-    ):
-        st.session_state["active_nav_slice"] = nav_m2["key"]
-        st.query_params["slice"] = nav_m2["key"]
-        st.rerun()
-
 due_notifications = collect_scheduled_notifications(nav_leave_rows, nav_dnp_rows, now_ist)
 unseen_toasts = [n for n in due_notifications if n["key"] not in st.session_state["toasted_notifications"]]
 if unseen_toasts:
